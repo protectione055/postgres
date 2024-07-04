@@ -3,7 +3,7 @@
  * jsonapi.h
  *	  Declarations for JSON API support.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/common/jsonapi.h
@@ -30,15 +30,12 @@ typedef enum JsonTokenType
 	JSON_TOKEN_TRUE,
 	JSON_TOKEN_FALSE,
 	JSON_TOKEN_NULL,
-	JSON_TOKEN_END,
+	JSON_TOKEN_END
 } JsonTokenType;
 
 typedef enum JsonParseErrorType
 {
 	JSON_SUCCESS,
-	JSON_INCOMPLETE,
-	JSON_INVALID_LEXER_TYPE,
-	JSON_NESTING_TOO_DEEP,
 	JSON_ESCAPING_INVALID,
 	JSON_ESCAPING_REQUIRED,
 	JSON_EXPECTED_ARRAY_FIRST,
@@ -57,12 +54,9 @@ typedef enum JsonParseErrorType
 	JSON_UNICODE_UNTRANSLATABLE,
 	JSON_UNICODE_HIGH_SURROGATE,
 	JSON_UNICODE_LOW_SURROGATE,
-	JSON_SEM_ACTION_FAILED,		/* error should already be reported */
+	JSON_SEM_ACTION_FAILED		/* error should already be reported */
 } JsonParseErrorType;
 
-/* Parser state private to jsonapi.c */
-typedef struct JsonParserStack JsonParserStack;
-typedef struct JsonIncrementalState JsonIncrementalState;
 
 /*
  * All the fields in this structure should be treated as read-only.
@@ -76,34 +70,20 @@ typedef struct JsonIncrementalState JsonIncrementalState;
  * token_terminator and prev_token_terminator point to the character
  * AFTER the end of the token, i.e. where there would be a nul byte
  * if we were using nul-terminated strings.
- *
- * The prev_token_terminator field should not be used when incremental is
- * true, as the previous token might have started in a previous piece of input,
- * and thus it can't be used in any pointer arithmetic or other operations in
- * conjunction with token_start.
- *
- * JSONLEX_FREE_STRUCT/STRVAL are used to drive freeJsonLexContext.
  */
-#define JSONLEX_FREE_STRUCT			(1 << 0)
-#define JSONLEX_FREE_STRVAL			(1 << 1)
 typedef struct JsonLexContext
 {
-	const char *input;
-	size_t		input_length;
+	char	   *input;
+	int			input_length;
 	int			input_encoding;
-	const char *token_start;
-	const char *token_terminator;
-	const char *prev_token_terminator;
-	bool		incremental;
+	char	   *token_start;
+	char	   *token_terminator;
+	char	   *prev_token_terminator;
 	JsonTokenType token_type;
 	int			lex_level;
-	bits32		flags;
 	int			line_number;	/* line number, starting from 1 */
-	const char *line_start;		/* where that line starts within input */
-	JsonParserStack *pstack;
-	JsonIncrementalState *inc_state;
+	char	   *line_start;		/* where that line starts within input */
 	StringInfo	strval;
-	StringInfo	errormsg;
 } JsonLexContext;
 
 typedef JsonParseErrorType (*json_struct_action) (void *state);
@@ -155,12 +135,6 @@ typedef struct JsonSemAction
 extern JsonParseErrorType pg_parse_json(JsonLexContext *lex,
 										JsonSemAction *sem);
 
-extern JsonParseErrorType pg_parse_json_incremental(JsonLexContext *lex,
-													JsonSemAction *sem,
-													const char *json,
-													size_t len,
-													bool is_last);
-
 /* the null action object used for pure validation */
 extern PGDLLIMPORT JsonSemAction nullSemAction;
 
@@ -177,36 +151,15 @@ extern JsonParseErrorType json_count_array_elements(JsonLexContext *lex,
 													int *elements);
 
 /*
- * initializer for JsonLexContext.
- *
- * If a valid 'lex' pointer is given, it is initialized.  This can be used
- * for stack-allocated structs, saving overhead.  If NULL is given, a new
- * struct is allocated.
- *
- * If need_escapes is true, ->strval stores the unescaped lexemes.
- * Unescaping is expensive, so only request it when necessary.
- *
- * If need_escapes is true or lex was given as NULL, then the caller is
- * responsible for freeing the returned struct, either by calling
- * freeJsonLexContext() or (in backend environment) via memory context
- * cleanup.
+ * constructor for JsonLexContext, with or without strval element.
+ * If supplied, the strval element will contain a de-escaped version of
+ * the lexeme. However, doing this imposes a performance penalty, so
+ * it should be avoided if the de-escaped lexeme is not required.
  */
-extern JsonLexContext *makeJsonLexContextCstringLen(JsonLexContext *lex,
-													const char *json,
-													size_t len,
+extern JsonLexContext *makeJsonLexContextCstringLen(char *json,
+													int len,
 													int encoding,
 													bool need_escapes);
-
-/*
- * make a JsonLexContext suitable for incremental parsing.
- * the string chunks will be handed to pg_parse_json_incremental,
- * so there's no need for them here.
- */
-extern JsonLexContext *makeJsonLexContextIncremental(JsonLexContext *lex,
-													 int encoding,
-													 bool need_escapes);
-
-extern void freeJsonLexContext(JsonLexContext *lex);
 
 /* lex one token */
 extern JsonParseErrorType json_lex(JsonLexContext *lex);
@@ -219,6 +172,6 @@ extern char *json_errdetail(JsonParseErrorType error, JsonLexContext *lex);
  *
  * str argument does not need to be nul-terminated.
  */
-extern bool IsValidJsonNumber(const char *str, size_t len);
+extern bool IsValidJsonNumber(const char *str, int len);
 
 #endif							/* JSONAPI_H */

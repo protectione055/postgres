@@ -2,7 +2,7 @@
  *
  * bbstreamer_zstd.c
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/bbstreamer_zstd.c
@@ -38,7 +38,7 @@ static void bbstreamer_zstd_compressor_content(bbstreamer *streamer,
 static void bbstreamer_zstd_compressor_finalize(bbstreamer *streamer);
 static void bbstreamer_zstd_compressor_free(bbstreamer *streamer);
 
-static const bbstreamer_ops bbstreamer_zstd_compressor_ops = {
+const bbstreamer_ops bbstreamer_zstd_compressor_ops = {
 	.content = bbstreamer_zstd_compressor_content,
 	.finalize = bbstreamer_zstd_compressor_finalize,
 	.free = bbstreamer_zstd_compressor_free
@@ -51,7 +51,7 @@ static void bbstreamer_zstd_decompressor_content(bbstreamer *streamer,
 static void bbstreamer_zstd_decompressor_finalize(bbstreamer *streamer);
 static void bbstreamer_zstd_decompressor_free(bbstreamer *streamer);
 
-static const bbstreamer_ops bbstreamer_zstd_decompressor_ops = {
+const bbstreamer_ops bbstreamer_zstd_decompressor_ops = {
 	.content = bbstreamer_zstd_decompressor_content,
 	.finalize = bbstreamer_zstd_decompressor_finalize,
 	.free = bbstreamer_zstd_decompressor_free

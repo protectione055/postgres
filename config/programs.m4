@@ -33,9 +33,10 @@ if test "$BISON"; then
   AC_MSG_NOTICE([using $pgac_bison_version])
   if echo "$pgac_bison_version" | $AWK '{ if ([$]4 < 2.3) exit 0; else exit 1;}'
   then
-    AC_MSG_ERROR([
+    AC_MSG_WARN([
 *** The installed version of Bison, $BISON, is too old to use with PostgreSQL.
 *** Bison version 2.3 or later is required, but this is $pgac_bison_version.])
+    BISON=""
   fi
   # Bison >=3.0 issues warnings about %name-prefix="base_yy", instead
   # of the now preferred %name-prefix "base_yy", but the latter
@@ -48,7 +49,12 @@ if test "$BISON"; then
 fi
 
 if test -z "$BISON"; then
-  AC_MSG_ERROR([bison not found])
+  AC_MSG_WARN([
+*** Without Bison you will not be able to build PostgreSQL from Git nor
+*** change any of the parser definition files.  You can obtain Bison from
+*** a GNU mirror site.  (If you are using the official distribution of
+*** PostgreSQL then you do not need to worry about this, because the Bison
+*** output is pre-generated.)])
 fi
 dnl We don't need AC_SUBST(BISON) because PGAC_PATH_PROGS did it
 AC_SUBST(BISONFLAGS)
@@ -89,7 +95,7 @@ else
             pgac_cv_path_flex=$pgac_candidate
             break 2
           else
-            AC_MSG_ERROR([
+            AC_MSG_WARN([
 *** The installed version of Flex, $pgac_candidate, is too old to use with PostgreSQL.
 *** Flex version 2.5.35 or later is required, but this is $pgac_flex_version.])
           fi
@@ -103,7 +109,14 @@ fi
 ])[]dnl AC_CACHE_CHECK
 
 if test x"$pgac_cv_path_flex" = x"no"; then
-  AC_MSG_ERROR([flex not found])
+  AC_MSG_WARN([
+*** Without Flex you will not be able to build PostgreSQL from Git nor
+*** change any of the scanner definition files.  You can obtain Flex from
+*** a GNU mirror site.  (If you are using the official distribution of
+*** PostgreSQL then you do not need to worry about this because the Flex
+*** output is pre-generated.)])
+
+  FLEX=
 else
   FLEX=$pgac_cv_path_flex
   pgac_flex_version=`$FLEX --version 2>/dev/null`

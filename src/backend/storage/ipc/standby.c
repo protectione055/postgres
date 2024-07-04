@@ -7,7 +7,7 @@
  *	AccessExclusiveLocks and starting snapshots for Hot Standby mode.
  *	Plus conflict recovery processing.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -26,11 +26,13 @@
 #include "pgstat.h"
 #include "replication/slot.h"
 #include "storage/bufmgr.h"
+#include "storage/lmgr.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/sinvaladt.h"
 #include "storage/standby.h"
 #include "utils/hsearch.h"
+#include "utils/memutils.h"
 #include "utils/ps_status.h"
 #include "utils/timeout.h"
 #include "utils/timestamp.h"
@@ -135,8 +137,7 @@ InitRecoveryTransactionEnvironment(void)
 	 * are held by vxids and row level locks are held by xids. All queries
 	 * hold AccessShareLocks so never block while we write or lock new rows.
 	 */
-	MyProc->vxid.procNumber = MyProcNumber;
-	vxid.procNumber = MyProcNumber;
+	vxid.backendId = MyBackendId;
 	vxid.localTransactionId = GetNextLocalTransactionId();
 	VirtualXactLockTableInsert(vxid);
 
@@ -298,7 +299,7 @@ LogRecoveryConflict(ProcSignalReason reason, TimestampTz wait_start,
 		vxids = wait_list;
 		while (VirtualTransactionIdIsValid(*vxids))
 		{
-			PGPROC	   *proc = ProcNumberGetProc(vxids->procNumber);
+			PGPROC	   *proc = BackendIdGetProc(vxids->backendId);
 
 			/* proc can be NULL if the target backend is not active */
 			if (proc)
@@ -839,7 +840,7 @@ ResolveRecoveryConflictWithBufferPin(void)
 	 * SIGHUP signal handler, etc cannot do that because it uses the different
 	 * latch from that ProcWaitForSignal() waits on.
 	 */
-	ProcWaitForSignal(WAIT_EVENT_BUFFER_PIN);
+	ProcWaitForSignal(PG_WAIT_BUFFER_PIN);
 
 	if (got_standby_delay_timeout)
 		SendRecoveryConflictWithBufferPin(PROCSIG_RECOVERY_CONFLICT_BUFFERPIN);
@@ -996,7 +997,8 @@ StandbyAcquireAccessExclusiveLock(TransactionId xid, Oid dbOid, Oid relOid)
 		TransactionIdDidAbort(xid))
 		return;
 
-	elog(DEBUG4, "adding recovery lock: db %u rel %u", dbOid, relOid);
+	elog(trace_recovery(DEBUG4),
+		 "adding recovery lock: db %u rel %u", dbOid, relOid);
 
 	/* dbOid is InvalidOid when we are locking a shared relation. */
 	Assert(OidIsValid(relOid));
@@ -1040,7 +1042,7 @@ StandbyReleaseXidEntryLocks(RecoveryLockXidEntry *xidentry)
 	{
 		LOCKTAG		locktag;
 
-		elog(DEBUG4,
+		elog(trace_recovery(DEBUG4),
 			 "releasing recovery lock: xid %u db %u rel %u",
 			 entry->key.xid, entry->key.dbOid, entry->key.relOid);
 		/* Release the lock ... */
@@ -1107,7 +1109,7 @@ StandbyReleaseAllLocks(void)
 	HASH_SEQ_STATUS status;
 	RecoveryLockXidEntry *entry;
 
-	elog(DEBUG2, "release all standby locks");
+	elog(trace_recovery(DEBUG2), "release all standby locks");
 
 	hash_seq_init(&status, RecoveryLockXidHash);
 	while ((entry = hash_seq_search(&status)))
@@ -1184,7 +1186,7 @@ standby_redo(XLogReaderState *record)
 
 		running.xcnt = xlrec->xcnt;
 		running.subxcnt = xlrec->subxcnt;
-		running.subxid_status = xlrec->subxid_overflow ? SUBXIDS_MISSING : SUBXIDS_IN_ARRAY;
+		running.subxid_overflow = xlrec->subxid_overflow;
 		running.nextXid = xlrec->nextXid;
 		running.latestCompletedXid = xlrec->latestCompletedXid;
 		running.oldestRunningXid = xlrec->oldestRunningXid;
@@ -1349,7 +1351,7 @@ LogCurrentRunningXacts(RunningTransactions CurrRunningXacts)
 
 	xlrec.xcnt = CurrRunningXacts->xcnt;
 	xlrec.subxcnt = CurrRunningXacts->subxcnt;
-	xlrec.subxid_overflow = (CurrRunningXacts->subxid_status != SUBXIDS_IN_ARRAY);
+	xlrec.subxid_overflow = CurrRunningXacts->subxid_overflow;
 	xlrec.nextXid = CurrRunningXacts->nextXid;
 	xlrec.oldestRunningXid = CurrRunningXacts->oldestRunningXid;
 	xlrec.latestCompletedXid = CurrRunningXacts->latestCompletedXid;
@@ -1366,8 +1368,8 @@ LogCurrentRunningXacts(RunningTransactions CurrRunningXacts)
 
 	recptr = XLogInsert(RM_STANDBY_ID, XLOG_RUNNING_XACTS);
 
-	if (xlrec.subxid_overflow)
-		elog(DEBUG2,
+	if (CurrRunningXacts->subxid_overflow)
+		elog(trace_recovery(DEBUG2),
 			 "snapshot of %d running transactions overflowed (lsn %X/%X oldest xid %u latest complete %u next xid %u)",
 			 CurrRunningXacts->xcnt,
 			 LSN_FORMAT_ARGS(recptr),
@@ -1375,7 +1377,7 @@ LogCurrentRunningXacts(RunningTransactions CurrRunningXacts)
 			 CurrRunningXacts->latestCompletedXid,
 			 CurrRunningXacts->nextXid);
 	else
-		elog(DEBUG2,
+		elog(trace_recovery(DEBUG2),
 			 "snapshot of %d+%d running transaction ids (lsn %X/%X oldest xid %u latest complete %u next xid %u)",
 			 CurrRunningXacts->xcnt, CurrRunningXacts->subxcnt,
 			 LSN_FORMAT_ARGS(recptr),

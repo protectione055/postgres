@@ -55,12 +55,43 @@ static struct sqlca_t sqlca_init =
 	}
 };
 
+#ifdef ENABLE_THREAD_SAFETY
 static pthread_key_t sqlca_key;
 static pthread_once_t sqlca_key_once = PTHREAD_ONCE_INIT;
+#else
+static struct sqlca_t sqlca =
+{
+	{
+		'S', 'Q', 'L', 'C', 'A', ' ', ' ', ' '
+	},
+	sizeof(struct sqlca_t),
+	0,
+	{
+		0,
+		{
+			0
+		}
+	},
+	{
+		'N', 'O', 'T', ' ', 'S', 'E', 'T', ' '
+	},
+	{
+		0, 0, 0, 0, 0, 0
+	},
+	{
+		0, 0, 0, 0, 0, 0, 0, 0
+	},
+	{
+		'0', '0', '0', '0', '0'
+	}
+};
+#endif
 
+#ifdef ENABLE_THREAD_SAFETY
 static pthread_mutex_t debug_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t debug_init_mutex = PTHREAD_MUTEX_INITIALIZER;
-static volatile int simple_debug = 0;
+#endif
+static int	simple_debug = 0;
 static FILE *debugstream = NULL;
 
 void
@@ -92,6 +123,7 @@ ecpg_init(const struct connection *con, const char *connection_name, const int l
 	return true;
 }
 
+#ifdef ENABLE_THREAD_SAFETY
 static void
 ecpg_sqlca_key_destructor(void *arg)
 {
@@ -103,10 +135,12 @@ ecpg_sqlca_key_init(void)
 {
 	pthread_key_create(&sqlca_key, ecpg_sqlca_key_destructor);
 }
+#endif
 
 struct sqlca_t *
 ECPGget_sqlca(void)
 {
+#ifdef ENABLE_THREAD_SAFETY
 	struct sqlca_t *sqlca;
 
 	pthread_once(&sqlca_key_once, ecpg_sqlca_key_init);
@@ -121,6 +155,9 @@ ECPGget_sqlca(void)
 		pthread_setspecific(sqlca_key, sqlca);
 	}
 	return sqlca;
+#else
+	return &sqlca;
+#endif
 }
 
 bool
@@ -203,11 +240,9 @@ ECPGtrans(int lineno, const char *connection_name, const char *transaction)
 void
 ECPGdebug(int n, FILE *dbgs)
 {
-	/* Interlock against concurrent executions of ECPGdebug() */
+#ifdef ENABLE_THREAD_SAFETY
 	pthread_mutex_lock(&debug_init_mutex);
-
-	/* Prevent ecpg_log() from printing while we change settings */
-	pthread_mutex_lock(&debug_mutex);
+#endif
 
 	if (n > 100)
 	{
@@ -219,13 +254,11 @@ ECPGdebug(int n, FILE *dbgs)
 
 	debugstream = dbgs;
 
-	/* We must release debug_mutex before invoking ecpg_log() ... */
-	pthread_mutex_unlock(&debug_mutex);
-
-	/* ... but keep holding debug_init_mutex to avoid racy printout */
 	ecpg_log("ECPGdebug: set to %d\n", simple_debug);
 
+#ifdef ENABLE_THREAD_SAFETY
 	pthread_mutex_unlock(&debug_init_mutex);
+#endif
 }
 
 void
@@ -237,11 +270,6 @@ ecpg_log(const char *format,...)
 	int			bufsize;
 	char	   *fmt;
 
-	/*
-	 * For performance reasons, inspect simple_debug without taking the mutex.
-	 * This could be problematic if fetching an int isn't atomic, but we
-	 * assume that it is in many other places too.
-	 */
 	if (!simple_debug)
 		return;
 
@@ -262,26 +290,26 @@ ecpg_log(const char *format,...)
 	else
 		snprintf(fmt, bufsize, "[%d]: %s", (int) getpid(), intl_format);
 
+#ifdef ENABLE_THREAD_SAFETY
 	pthread_mutex_lock(&debug_mutex);
+#endif
 
-	/* Now that we hold the mutex, recheck simple_debug */
-	if (simple_debug)
+	va_start(ap, format);
+	vfprintf(debugstream, fmt, ap);
+	va_end(ap);
+
+	/* dump out internal sqlca variables */
+	if (ecpg_internal_regression_mode && sqlca != NULL)
 	{
-		va_start(ap, format);
-		vfprintf(debugstream, fmt, ap);
-		va_end(ap);
-
-		/* dump out internal sqlca variables */
-		if (ecpg_internal_regression_mode && sqlca != NULL)
-		{
-			fprintf(debugstream, "[NO_PID]: sqlca: code: %ld, state: %s\n",
-					sqlca->sqlcode, sqlca->sqlstate);
-		}
-
-		fflush(debugstream);
+		fprintf(debugstream, "[NO_PID]: sqlca: code: %ld, state: %s\n",
+				sqlca->sqlcode, sqlca->sqlstate);
 	}
 
+	fflush(debugstream);
+
+#ifdef ENABLE_THREAD_SAFETY
 	pthread_mutex_unlock(&debug_mutex);
+#endif
 
 	free(fmt);
 }
@@ -423,6 +451,7 @@ ECPGis_noind_null(enum ECPGttype type, const void *ptr)
 }
 
 #ifdef WIN32
+#ifdef ENABLE_THREAD_SAFETY
 
 int
 pthread_mutex_init(pthread_mutex_t *mp, void *attr)
@@ -474,6 +503,7 @@ win32_pthread_once(volatile pthread_once_t *once, void (*fn) (void))
 		pthread_mutex_unlock(&win32_pthread_once_lock);
 	}
 }
+#endif							/* ENABLE_THREAD_SAFETY */
 #endif							/* WIN32 */
 
 #ifdef ENABLE_NLS

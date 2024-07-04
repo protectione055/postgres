@@ -10,7 +10,7 @@
  * only here to simplify syncing this file with scan.l.
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -185,16 +185,16 @@ static struct _if_value
  * versions of Postgres failed to recognize -- as a comment if the input
  * did not end with a newline.
  *
- * non_newline_space tracks all space characters except newlines.
+ * XXX perhaps \f (formfeed) should be treated as a newline as well?
  *
  * XXX if you change the set of whitespace characters, fix ecpg_isspace()
  * to agree.
  */
 
-space				[ \t\n\r\f\v]
-non_newline_space	[ \t\f\v]
-newline				[\n\r]
-non_newline			[^\n\r]
+space			[ \t\n\r\f]
+horiz_space		[ \t\f]
+newline			[\n\r]
+non_newline		[^\n\r]
 
 comment			("--"{non_newline}*)
 
@@ -207,8 +207,8 @@ whitespace		({space}+|{comment})
  * it, whereas {whitespace} should generally have a * after it...
  */
 
-non_newline_whitespace	({non_newline_space}|{comment})
-whitespace_with_newline	({non_newline_whitespace}*{newline}{whitespace}*)
+horiz_whitespace		({horiz_space}|{comment})
+whitespace_with_newline	({horiz_whitespace}*{newline}{whitespace}*)
 
 quote			'
 /* If we see {quote} then {quotecontinue}, the quoted string continues */
@@ -376,7 +376,7 @@ octfail			0[oO]_?
 binfail			0[bB]_?
 
 numeric			(({decinteger}\.{decinteger}?)|(\.{decinteger}))
-numericfail		{decinteger}\.\.
+numericfail		{decdigit}+\.\.
 
 real			({decinteger}|{numeric})[Ee][-+]?{decinteger}
 realfail		({decinteger}|{numeric})[Ee][-+]
@@ -388,9 +388,8 @@ bininteger_junk	{bininteger}{ident_start}
 numeric_junk	{numeric}{ident_start}
 real_junk		{real}{ident_start}
 
-/* Positional parameters don't accept underscores. */
-param			\${decdigit}+
-param_junk		\${decdigit}+{ident_start}
+param			\${decinteger}
+param_junk		\${decinteger}{ident_start}
 
 /* special characters for other dbms */
 /* we have to react differently in compat mode */
@@ -938,13 +937,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 				}
 
 {param}			{
-					int			val;
-
-					errno = 0;
-					val = strtoint(yytext + 1, NULL, 10);
-					if (errno == ERANGE)
-						mmfatal(PARSE_ERROR, "parameter number too large");
-					base_yylval.ival = val;
+					base_yylval.ival = atol(yytext+1);
 					return PARAM;
 				}
 {param_junk}	{
@@ -1758,8 +1751,7 @@ ecpg_isspace(char ch)
 		ch == '\t' ||
 		ch == '\n' ||
 		ch == '\r' ||
-		ch == '\f' ||
-		ch == '\v')
+		ch == '\f')
 		return true;
 	return false;
 }

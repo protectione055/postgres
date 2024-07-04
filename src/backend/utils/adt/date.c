@@ -3,7 +3,7 @@
  * date.c
  *	  implements DATE and TIME data types specified in SQL standard
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994-5, Regents of the University of California
  *
  *
@@ -24,7 +24,6 @@
 #include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "common/hashfn.h"
-#include "common/int.h"
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "nodes/supportnodes.h"
@@ -2013,15 +2012,19 @@ interval_time(PG_FUNCTION_ARGS)
 {
 	Interval   *span = PG_GETARG_INTERVAL_P(0);
 	TimeADT		result;
+	int64		days;
 
-	if (INTERVAL_NOT_FINITE(span))
-		ereport(ERROR,
-				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
-				 errmsg("cannot convert infinite interval to time")));
-
-	result = span->time % USECS_PER_DAY;
-	if (result < 0)
-		result += USECS_PER_DAY;
+	result = span->time;
+	if (result >= USECS_PER_DAY)
+	{
+		days = result / USECS_PER_DAY;
+		result -= days * USECS_PER_DAY;
+	}
+	else if (result < 0)
+	{
+		days = (-result + USECS_PER_DAY - 1) / USECS_PER_DAY;
+		result += days * USECS_PER_DAY;
+	}
 
 	PG_RETURN_TIMEADT(result);
 }
@@ -2055,11 +2058,6 @@ time_pl_interval(PG_FUNCTION_ARGS)
 	Interval   *span = PG_GETARG_INTERVAL_P(1);
 	TimeADT		result;
 
-	if (INTERVAL_NOT_FINITE(span))
-		ereport(ERROR,
-				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
-				 errmsg("cannot add infinite interval to time")));
-
 	result = time + span->time;
 	result -= result / USECS_PER_DAY * USECS_PER_DAY;
 	if (result < INT64CONST(0))
@@ -2077,11 +2075,6 @@ time_mi_interval(PG_FUNCTION_ARGS)
 	TimeADT		time = PG_GETARG_TIMEADT(0);
 	Interval   *span = PG_GETARG_INTERVAL_P(1);
 	TimeADT		result;
-
-	if (INTERVAL_NOT_FINITE(span))
-		ereport(ERROR,
-				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
-				 errmsg("cannot subtract infinite interval from time")));
 
 	result = time - span->time;
 	result -= result / USECS_PER_DAY * USECS_PER_DAY;
@@ -2106,8 +2099,7 @@ in_range_time_interval(PG_FUNCTION_ARGS)
 
 	/*
 	 * Like time_pl_interval/time_mi_interval, we disregard the month and day
-	 * fields of the offset.  So our test for negative should too.  This also
-	 * catches -infinity, so we only need worry about +infinity below.
+	 * fields of the offset.  So our test for negative should too.
 	 */
 	if (offset->time < 0)
 		ereport(ERROR,
@@ -2117,14 +2109,13 @@ in_range_time_interval(PG_FUNCTION_ARGS)
 	/*
 	 * We can't use time_pl_interval/time_mi_interval here, because their
 	 * wraparound behavior would give wrong (or at least undesirable) answers.
-	 * Fortunately the equivalent non-wrapping behavior is trivial, except
-	 * that adding an infinite (or very large) interval might cause integer
-	 * overflow.  Subtraction cannot overflow here.
+	 * Fortunately the equivalent non-wrapping behavior is trivial, especially
+	 * since we don't worry about integer overflow.
 	 */
 	if (sub)
 		sum = base - offset->time;
-	else if (pg_add_s64_overflow(base, offset->time, &sum))
-		PG_RETURN_BOOL(less);
+	else
+		sum = base + offset->time;
 
 	if (less)
 		PG_RETURN_BOOL(val <= sum);
@@ -2599,11 +2590,6 @@ timetz_pl_interval(PG_FUNCTION_ARGS)
 	Interval   *span = PG_GETARG_INTERVAL_P(1);
 	TimeTzADT  *result;
 
-	if (INTERVAL_NOT_FINITE(span))
-		ereport(ERROR,
-				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
-				 errmsg("cannot add infinite interval to time")));
-
 	result = (TimeTzADT *) palloc(sizeof(TimeTzADT));
 
 	result->time = time->time + span->time;
@@ -2625,11 +2611,6 @@ timetz_mi_interval(PG_FUNCTION_ARGS)
 	TimeTzADT  *time = PG_GETARG_TIMETZADT_P(0);
 	Interval   *span = PG_GETARG_INTERVAL_P(1);
 	TimeTzADT  *result;
-
-	if (INTERVAL_NOT_FINITE(span))
-		ereport(ERROR,
-				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
-				 errmsg("cannot subtract infinite interval from time")));
 
 	result = (TimeTzADT *) palloc(sizeof(TimeTzADT));
 
@@ -2658,8 +2639,7 @@ in_range_timetz_interval(PG_FUNCTION_ARGS)
 
 	/*
 	 * Like timetz_pl_interval/timetz_mi_interval, we disregard the month and
-	 * day fields of the offset.  So our test for negative should too. This
-	 * also catches -infinity, so we only need worry about +infinity below.
+	 * day fields of the offset.  So our test for negative should too.
 	 */
 	if (offset->time < 0)
 		ereport(ERROR,
@@ -2669,14 +2649,13 @@ in_range_timetz_interval(PG_FUNCTION_ARGS)
 	/*
 	 * We can't use timetz_pl_interval/timetz_mi_interval here, because their
 	 * wraparound behavior would give wrong (or at least undesirable) answers.
-	 * Fortunately the equivalent non-wrapping behavior is trivial, except
-	 * that adding an infinite (or very large) interval might cause integer
-	 * overflow.  Subtraction cannot overflow here.
+	 * Fortunately the equivalent non-wrapping behavior is trivial, especially
+	 * since we don't worry about integer overflow.
 	 */
 	if (sub)
 		sum.time = base->time - offset->time;
-	else if (pg_add_s64_overflow(base->time, offset->time, &sum.time))
-		PG_RETURN_BOOL(less);
+	else
+		sum.time = base->time + offset->time;
 	sum.zone = base->zone;
 
 	if (less)
@@ -3126,13 +3105,6 @@ timetz_izone(PG_FUNCTION_ARGS)
 	TimeTzADT  *result;
 	int			tz;
 
-	if (INTERVAL_NOT_FINITE(zone))
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("interval time zone \"%s\" must be finite",
-						DatumGetCString(DirectFunctionCall1(interval_out,
-															PointerGetDatum(zone))))));
-
 	if (zone->month != 0 || zone->day != 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -3154,19 +3126,4 @@ timetz_izone(PG_FUNCTION_ARGS)
 	result->zone = tz;
 
 	PG_RETURN_TIMETZADT_P(result);
-}
-
-/* timetz_at_local()
- *
- * Unlike for timestamp[tz]_at_local, the type for timetz does not flip between
- * time with/without time zone, so we cannot just call the conversion function.
- */
-Datum
-timetz_at_local(PG_FUNCTION_ARGS)
-{
-	Datum		time = PG_GETARG_DATUM(0);
-	const char *tzn = pg_get_timezone_name(session_timezone);
-	Datum		zone = PointerGetDatum(cstring_to_text(tzn));
-
-	return DirectFunctionCall2(timetz_zone, zone, time);
 }

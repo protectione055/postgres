@@ -44,7 +44,7 @@
  * if the old one gets invalidated.
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -63,12 +63,13 @@
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
 #include "parser/analyze.h"
+#include "parser/parsetree.h"
 #include "storage/lmgr.h"
 #include "tcop/pquery.h"
 #include "tcop/utility.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
-#include "utils/resowner.h"
+#include "utils/resowner_private.h"
 #include "utils/rls.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
@@ -117,31 +118,6 @@ static TupleDesc PlanCacheComputeResultDesc(List *stmt_list);
 static void PlanCacheRelCallback(Datum arg, Oid relid);
 static void PlanCacheObjectCallback(Datum arg, int cacheid, uint32 hashvalue);
 static void PlanCacheSysCallback(Datum arg, int cacheid, uint32 hashvalue);
-
-/* ResourceOwner callbacks to track plancache references */
-static void ResOwnerReleaseCachedPlan(Datum res);
-
-static const ResourceOwnerDesc planref_resowner_desc =
-{
-	.name = "plancache reference",
-	.release_phase = RESOURCE_RELEASE_AFTER_LOCKS,
-	.release_priority = RELEASE_PRIO_PLANCACHE_REFS,
-	.ReleaseResource = ResOwnerReleaseCachedPlan,
-	.DebugPrint = NULL			/* the default message is fine */
-};
-
-/* Convenience wrappers over ResourceOwnerRemember/Forget */
-static inline void
-ResourceOwnerRememberPlanCacheRef(ResourceOwner owner, CachedPlan *plan)
-{
-	ResourceOwnerRemember(owner, PointerGetDatum(plan), &planref_resowner_desc);
-}
-static inline void
-ResourceOwnerForgetPlanCacheRef(ResourceOwner owner, CachedPlan *plan)
-{
-	ResourceOwnerForget(owner, PointerGetDatum(plan), &planref_resowner_desc);
-}
-
 
 /* GUC parameter */
 int			plan_cache_mode = PLAN_CACHE_MODE_AUTO;
@@ -433,7 +409,7 @@ CompleteCachedPlan(CachedPlanSource *plansource,
 		 * one-shot plans; and we *must* skip this for transaction control
 		 * commands, because this could result in catalog accesses.
 		 */
-		plansource->search_path = GetSearchPathMatcher(querytree_context);
+		plansource->search_path = GetOverrideSearchPath(querytree_context);
 	}
 
 	/*
@@ -612,7 +588,7 @@ RevalidateCachedQuery(CachedPlanSource *plansource,
 	if (plansource->is_valid)
 	{
 		Assert(plansource->search_path != NULL);
-		if (!SearchPathMatchesCurrentEnvironment(plansource->search_path))
+		if (!OverrideSearchPathMatchesCurrent(plansource->search_path))
 		{
 			/* Invalidate the querytree and generic plan */
 			plansource->is_valid = false;
@@ -727,7 +703,8 @@ RevalidateCachedQuery(CachedPlanSource *plansource,
 		PopActiveSnapshot();
 
 	/*
-	 * Check or update the result tupdesc.
+	 * Check or update the result tupdesc.  XXX should we use a weaker
+	 * condition than equalTupleDescs() here?
 	 *
 	 * We assume the parameter types didn't change from the first time, so no
 	 * need to update that.
@@ -738,7 +715,7 @@ RevalidateCachedQuery(CachedPlanSource *plansource,
 		/* OK, doesn't return tuples */
 	}
 	else if (resultDesc == NULL || plansource->resultDesc == NULL ||
-			 !equalRowTypes(resultDesc, plansource->resultDesc))
+			 !equalTupleDescs(resultDesc, plansource->resultDesc))
 	{
 		/* can we give a better error message? */
 		if (plansource->fixed_result)
@@ -784,7 +761,7 @@ RevalidateCachedQuery(CachedPlanSource *plansource,
 	 * not generate much extra cruft either, since almost certainly the path
 	 * is already valid.)
 	 */
-	plansource->search_path = GetSearchPathMatcher(querytree_context);
+	plansource->search_path = GetOverrideSearchPath(querytree_context);
 
 	MemoryContextSwitchTo(oldcxt);
 
@@ -1256,7 +1233,7 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 
 	/* Flag the plan as in use by caller */
 	if (owner)
-		ResourceOwnerEnlarge(owner);
+		ResourceOwnerEnlargePlanCacheRefs(owner);
 	plan->refcount++;
 	if (owner)
 		ResourceOwnerRememberPlanCacheRef(owner, plan);
@@ -1351,7 +1328,7 @@ CachedPlanAllowsSimpleValidityCheck(CachedPlanSource *plansource,
 	Assert(plan->is_valid);
 	Assert(plan == plansource->gplan);
 	Assert(plansource->search_path != NULL);
-	Assert(SearchPathMatchesCurrentEnvironment(plansource->search_path));
+	Assert(OverrideSearchPathMatchesCurrent(plansource->search_path));
 
 	/* We don't support oneshot plans here. */
 	if (plansource->is_oneshot)
@@ -1419,7 +1396,7 @@ CachedPlanAllowsSimpleValidityCheck(CachedPlanSource *plansource,
 	/* Bump refcount if requested. */
 	if (owner)
 	{
-		ResourceOwnerEnlarge(owner);
+		ResourceOwnerEnlargePlanCacheRefs(owner);
 		plan->refcount++;
 		ResourceOwnerRememberPlanCacheRef(owner, plan);
 	}
@@ -1474,13 +1451,13 @@ CachedPlanIsSimplyValid(CachedPlanSource *plansource, CachedPlan *plan,
 
 	/* Is the search_path still the same as when we made it? */
 	Assert(plansource->search_path != NULL);
-	if (!SearchPathMatchesCurrentEnvironment(plansource->search_path))
+	if (!OverrideSearchPathMatchesCurrent(plansource->search_path))
 		return false;
 
 	/* It's still good.  Bump refcount if requested. */
 	if (owner)
 	{
-		ResourceOwnerEnlarge(owner);
+		ResourceOwnerEnlargePlanCacheRefs(owner);
 		plan->refcount++;
 		ResourceOwnerRememberPlanCacheRef(owner, plan);
 	}
@@ -1590,7 +1567,7 @@ CopyCachedPlan(CachedPlanSource *plansource)
 	newsource->relationOids = copyObject(plansource->relationOids);
 	newsource->invalItems = copyObject(plansource->invalItems);
 	if (plansource->search_path)
-		newsource->search_path = CopySearchPathMatcher(plansource->search_path);
+		newsource->search_path = CopyOverrideSearchPath(plansource->search_path);
 	newsource->query_context = querytree_context;
 	newsource->rewriteRoleId = plansource->rewriteRoleId;
 	newsource->rewriteRowSecurity = plansource->rewriteRowSecurity;
@@ -2225,21 +2202,4 @@ ResetPlanCache(void)
 
 		cexpr->is_valid = false;
 	}
-}
-
-/*
- * Release all CachedPlans remembered by 'owner'
- */
-void
-ReleaseAllPlanCacheRefsInOwner(ResourceOwner owner)
-{
-	ResourceOwnerReleaseAllOfKind(owner, &planref_resowner_desc);
-}
-
-/* ResourceOwner callbacks */
-
-static void
-ResOwnerReleaseCachedPlan(Datum res)
-{
-	ReleaseCachedPlan((CachedPlan *) DatumGetPointer(res), NULL);
 }

@@ -6,7 +6,6 @@
 #include <ctype.h>
 
 #include "catalog/pg_type.h"
-#include "common/int.h"
 #include "lib/qunique.h"
 #include "miscadmin.h"
 #include "trgm.h"
@@ -434,7 +433,12 @@ comp_ptrgm(const void *v1, const void *v2)
 	if (cmp != 0)
 		return cmp;
 
-	return pg_cmp_s32(p1->index, p2->index);
+	if (p1->index < p2->index)
+		return -1;
+	else if (p1->index == p2->index)
+		return 0;
+	else
+		return 1;
 }
 
 /*

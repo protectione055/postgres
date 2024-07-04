@@ -3,7 +3,7 @@
  * worker_internal.h
  *	  Internal headers shared by logical replication workers.
  *
- * Portions Copyright (c) 2016-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2016-2023, PostgreSQL Global Development Group
  *
  * src/include/replication/worker_internal.h
  *
@@ -12,12 +12,13 @@
 #ifndef WORKER_INTERNAL_H
 #define WORKER_INTERNAL_H
 
+#include <signal.h>
+
 #include "access/xlogdefs.h"
 #include "catalog/pg_subscription.h"
 #include "datatype/timestamp.h"
 #include "miscadmin.h"
 #include "replication/logicalrelation.h"
-#include "replication/walreceiver.h"
 #include "storage/buffile.h"
 #include "storage/fileset.h"
 #include "storage/lock.h"
@@ -25,20 +26,9 @@
 #include "storage/shm_toc.h"
 #include "storage/spin.h"
 
-/* Different types of worker */
-typedef enum LogicalRepWorkerType
-{
-	WORKERTYPE_UNKNOWN = 0,
-	WORKERTYPE_TABLESYNC,
-	WORKERTYPE_APPLY,
-	WORKERTYPE_PARALLEL_APPLY,
-} LogicalRepWorkerType;
 
 typedef struct LogicalRepWorker
 {
-	/* What type of worker is this? */
-	LogicalRepWorkerType type;
-
 	/* Time at which this worker was launched. */
 	TimestampTz launch_time;
 
@@ -104,7 +94,7 @@ typedef enum ParallelTransState
 {
 	PARALLEL_TRANS_UNKNOWN,
 	PARALLEL_TRANS_STARTED,
-	PARALLEL_TRANS_FINISHED,
+	PARALLEL_TRANS_FINISHED
 } ParallelTransState;
 
 /*
@@ -128,7 +118,7 @@ typedef enum PartialFileSetState
 	FS_EMPTY,
 	FS_SERIALIZE_IN_PROGRESS,
 	FS_SERIALIZE_DONE,
-	FS_READY,
+	FS_READY
 } PartialFileSetState;
 
 /*
@@ -241,8 +231,7 @@ extern void logicalrep_worker_attach(int slot);
 extern LogicalRepWorker *logicalrep_worker_find(Oid subid, Oid relid,
 												bool only_running);
 extern List *logicalrep_workers_find(Oid subid, bool only_running);
-extern bool logicalrep_worker_launch(LogicalRepWorkerType wtype,
-									 Oid dbid, Oid subid, const char *subname,
+extern bool logicalrep_worker_launch(Oid dbid, Oid subid, const char *subname,
 									 Oid userid, Oid relid,
 									 dsm_handle subworker_dsm);
 extern void logicalrep_worker_stop(Oid subid, Oid relid);
@@ -254,6 +243,7 @@ extern int	logicalrep_sync_worker_count(Oid subid);
 
 extern void ReplicationOriginNameForLogicalRep(Oid suboid, Oid relid,
 											   char *originname, Size szoriginname);
+extern char *LogicalRepSyncTableStart(XLogRecPtr *origin_startpos);
 
 extern bool AllTablesyncsReady(void);
 extern void UpdateTwoPhaseState(Oid suboid, char new_state);
@@ -275,17 +265,7 @@ extern void maybe_reread_subscription(void);
 
 extern void stream_cleanup_files(Oid subid, TransactionId xid);
 
-extern void set_stream_options(WalRcvStreamOptions *options,
-							   char *slotname,
-							   XLogRecPtr *origin_startpos);
-
-extern void start_apply(XLogRecPtr origin_startpos);
-
-extern void InitializeLogRepWorker(void);
-
-extern void SetupApplyOrSyncWorker(int worker_slot);
-
-extern void DisableSubscriptionAndExit(void);
+extern void InitializeApplyWorker(void);
 
 extern void store_flush_position(XLogRecPtr remote_lsn, XLogRecPtr local_lsn);
 
@@ -325,28 +305,24 @@ extern void pa_decr_and_wait_stream_block(void);
 extern void pa_xact_finish(ParallelApplyWorkerInfo *winfo,
 						   XLogRecPtr remote_lsn);
 
-#define isParallelApplyWorker(worker) ((worker)->in_use && \
-									   (worker)->type == WORKERTYPE_PARALLEL_APPLY)
-#define isTablesyncWorker(worker) ((worker)->in_use && \
-								   (worker)->type == WORKERTYPE_TABLESYNC)
+#define isParallelApplyWorker(worker) ((worker)->leader_pid != InvalidPid)
 
 static inline bool
 am_tablesync_worker(void)
 {
-	return isTablesyncWorker(MyLogicalRepWorker);
+	return OidIsValid(MyLogicalRepWorker->relid);
 }
 
 static inline bool
 am_leader_apply_worker(void)
 {
-	Assert(MyLogicalRepWorker->in_use);
-	return (MyLogicalRepWorker->type == WORKERTYPE_APPLY);
+	return (!am_tablesync_worker() &&
+			!isParallelApplyWorker(MyLogicalRepWorker));
 }
 
 static inline bool
 am_parallel_apply_worker(void)
 {
-	Assert(MyLogicalRepWorker->in_use);
 	return isParallelApplyWorker(MyLogicalRepWorker);
 }
 

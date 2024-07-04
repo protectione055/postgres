@@ -2,7 +2,7 @@
  *
  * walmethods.c - implementations of different ways to write received wal
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/walmethods.c
@@ -55,7 +55,7 @@ static int	dir_sync(Walfile *f);
 static bool dir_finish(WalWriteMethod *wwmethod);
 static void dir_free(WalWriteMethod *wwmethod);
 
-static const WalWriteMethodOps WalDirectoryMethodOps = {
+const WalWriteMethodOps WalDirectoryMethodOps = {
 	.open_for_write = dir_open_for_write,
 	.close = dir_close,
 	.existsfile = dir_existsfile,
@@ -594,11 +594,6 @@ dir_existsfile(WalWriteMethod *wwmethod, const char *pathname)
 
 	fd = open(tmppath, O_RDONLY | PG_BINARY, 0);
 	if (fd < 0)
-
-		/*
-		 * Skip setting dir_data->lasterrno here because we are only checking
-		 * for existence.
-		 */
 		return false;
 	close(fd);
 	return true;
@@ -676,7 +671,7 @@ static int	tar_sync(Walfile *f);
 static bool tar_finish(WalWriteMethod *wwmethod);
 static void tar_free(WalWriteMethod *wwmethod);
 
-static const WalWriteMethodOps WalTarMethodOps = {
+const WalWriteMethodOps WalTarMethodOps = {
 	.open_for_write = tar_open_for_write,
 	.close = tar_close,
 	.existsfile = tar_existsfile,
@@ -710,7 +705,7 @@ typedef struct TarMethodData
 
 #ifdef HAVE_LIBZ
 static bool
-tar_write_compressed_data(TarMethodData *tar_data, const void *buf, size_t count,
+tar_write_compressed_data(TarMethodData *tar_data, void *buf, size_t count,
 						  bool flush)
 {
 	tar_data->zp->next_in = buf;
@@ -787,7 +782,8 @@ tar_write(Walfile *f, const void *buf, size_t count)
 #ifdef HAVE_LIBZ
 	else if (f->wwmethod->compression_algorithm == PG_COMPRESSION_GZIP)
 	{
-		if (!tar_write_compressed_data(tar_data, buf, count, false))
+		if (!tar_write_compressed_data(tar_data, unconstify(void *, buf),
+									   count, false))
 			return -1;
 		f->currpos += count;
 		return count;
@@ -1135,7 +1131,7 @@ tar_close(Walfile *f, WalCloseMethod method)
 	 * possibly also renaming the file. We overwrite the entire current header
 	 * when done, including the checksum.
 	 */
-	print_tar_number(&(tf->header[TAR_OFFSET_SIZE]), 12, filesize);
+	print_tar_number(&(tf->header[124]), 12, filesize);
 
 	if (method == CLOSE_NORMAL)
 
@@ -1143,10 +1139,9 @@ tar_close(Walfile *f, WalCloseMethod method)
 		 * We overwrite it with what it was before if we have no tempname,
 		 * since we're going to write the buffer anyway.
 		 */
-		strlcpy(&(tf->header[TAR_OFFSET_NAME]), tf->base.pathname, 100);
+		strlcpy(&(tf->header[0]), tf->base.pathname, 100);
 
-	print_tar_number(&(tf->header[TAR_OFFSET_CHECKSUM]), 8,
-					 tarChecksum(((TarMethodFile *) f)->header));
+	print_tar_number(&(tf->header[148]), 8, tarChecksum(((TarMethodFile *) f)->header));
 	if (lseek(tar_data->fd, tf->ofs_start, SEEK_SET) != ((TarMethodFile *) f)->ofs_start)
 	{
 		f->wwmethod->lasterrno = errno;

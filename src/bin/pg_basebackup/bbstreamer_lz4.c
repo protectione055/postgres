@@ -2,7 +2,7 @@
  *
  * bbstreamer_lz4.c
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/bbstreamer_lz4.c
@@ -18,8 +18,8 @@
 #endif
 
 #include "bbstreamer.h"
-#include "common/file_perm.h"
 #include "common/logging.h"
+#include "common/file_perm.h"
 #include "common/string.h"
 
 #ifdef USE_LZ4
@@ -42,7 +42,7 @@ static void bbstreamer_lz4_compressor_content(bbstreamer *streamer,
 static void bbstreamer_lz4_compressor_finalize(bbstreamer *streamer);
 static void bbstreamer_lz4_compressor_free(bbstreamer *streamer);
 
-static const bbstreamer_ops bbstreamer_lz4_compressor_ops = {
+const bbstreamer_ops bbstreamer_lz4_compressor_ops = {
 	.content = bbstreamer_lz4_compressor_content,
 	.finalize = bbstreamer_lz4_compressor_finalize,
 	.free = bbstreamer_lz4_compressor_free
@@ -55,7 +55,7 @@ static void bbstreamer_lz4_decompressor_content(bbstreamer *streamer,
 static void bbstreamer_lz4_decompressor_finalize(bbstreamer *streamer);
 static void bbstreamer_lz4_decompressor_free(bbstreamer *streamer);
 
-static const bbstreamer_ops bbstreamer_lz4_decompressor_ops = {
+const bbstreamer_ops bbstreamer_lz4_decompressor_ops = {
 	.content = bbstreamer_lz4_decompressor_content,
 	.finalize = bbstreamer_lz4_decompressor_finalize,
 	.free = bbstreamer_lz4_decompressor_free

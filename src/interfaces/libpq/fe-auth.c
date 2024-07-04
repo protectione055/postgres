@@ -3,7 +3,7 @@
  * fe-auth.c
  *	   The front-end (client) authorization routines
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -124,7 +124,7 @@ pg_GSS_continue(PGconn *conn, int payloadlen)
 		 * first or subsequent packet, just send the same kind of password
 		 * packet.
 		 */
-		if (pqPacketSend(conn, PqMsg_GSSResponse,
+		if (pqPacketSend(conn, 'p',
 						 goutbuf.value, goutbuf.length) != STATUS_OK)
 		{
 			gss_release_buffer(&lmin_s, &goutbuf);
@@ -324,7 +324,7 @@ pg_SSPI_continue(PGconn *conn, int payloadlen)
 		 */
 		if (outbuf.pBuffers[0].cbBuffer > 0)
 		{
-			if (pqPacketSend(conn, PqMsg_GSSResponse,
+			if (pqPacketSend(conn, 'p',
 							 outbuf.pBuffers[0].pvBuffer, outbuf.pBuffers[0].cbBuffer))
 			{
 				FreeContextBuffer(outbuf.pBuffers[0].pvBuffer);
@@ -423,10 +423,11 @@ pg_SASL_init(PGconn *conn, int payloadlen)
 {
 	char	   *initialresponse = NULL;
 	int			initialresponselen;
+	bool		done;
+	bool		success;
 	const char *selected_mechanism;
 	PQExpBufferData mechanism_buf;
-	char	   *password = NULL;
-	SASLStatus	status;
+	char	   *password;
 
 	initPQExpBuffer(&mechanism_buf);
 
@@ -446,7 +447,8 @@ pg_SASL_init(PGconn *conn, int payloadlen)
 	/*
 	 * Parse the list of SASL authentication mechanisms in the
 	 * AuthenticationSASL message, and select the best mechanism that we
-	 * support. Mechanisms are listed by order of decreasing importance.
+	 * support.  SCRAM-SHA-256-PLUS and SCRAM-SHA-256 are the only ones
+	 * supported at the moment, listed by order of decreasing importance.
 	 */
 	selected_mechanism = NULL;
 	for (;;)
@@ -477,7 +479,7 @@ pg_SASL_init(PGconn *conn, int payloadlen)
 			{
 				/* The server has offered SCRAM-SHA-256-PLUS. */
 
-#ifdef USE_SSL
+#ifdef HAVE_PGTLS_GET_PEER_CERTIFICATE_HASH
 				/*
 				 * The client supports channel binding, which is chosen if
 				 * channel_binding is not disabled.
@@ -486,7 +488,6 @@ pg_SASL_init(PGconn *conn, int payloadlen)
 				{
 					selected_mechanism = SCRAM_SHA_256_PLUS_NAME;
 					conn->sasl = &pg_scram_mech;
-					conn->password_needed = true;
 				}
 #else
 				/*
@@ -522,7 +523,6 @@ pg_SASL_init(PGconn *conn, int payloadlen)
 		{
 			selected_mechanism = SCRAM_SHA_256_NAME;
 			conn->sasl = &pg_scram_mech;
-			conn->password_needed = true;
 		}
 	}
 
@@ -546,19 +546,18 @@ pg_SASL_init(PGconn *conn, int payloadlen)
 
 	/*
 	 * First, select the password to use for the exchange, complaining if
-	 * there isn't one and the selected SASL mechanism needs it.
+	 * there isn't one.  Currently, all supported SASL mechanisms require a
+	 * password, so we can just go ahead here without further distinction.
 	 */
-	if (conn->password_needed)
+	conn->password_needed = true;
+	password = conn->connhost[conn->whichhost].password;
+	if (password == NULL)
+		password = conn->pgpass;
+	if (password == NULL || password[0] == '\0')
 	{
-		password = conn->connhost[conn->whichhost].password;
-		if (password == NULL)
-			password = conn->pgpass;
-		if (password == NULL || password[0] == '\0')
-		{
-			appendPQExpBufferStr(&conn->errorMessage,
-								 PQnoPasswordSupplied);
-			goto error;
-		}
+		appendPQExpBufferStr(&conn->errorMessage,
+							 PQnoPasswordSupplied);
+		goto error;
 	}
 
 	Assert(conn->sasl);
@@ -576,17 +575,18 @@ pg_SASL_init(PGconn *conn, int payloadlen)
 		goto oom_error;
 
 	/* Get the mechanism-specific Initial Client Response, if any */
-	status = conn->sasl->exchange(conn->sasl_state,
-								  NULL, -1,
-								  &initialresponse, &initialresponselen);
+	conn->sasl->exchange(conn->sasl_state,
+						 NULL, -1,
+						 &initialresponse, &initialresponselen,
+						 &done, &success);
 
-	if (status == SASL_FAILED)
+	if (done && !success)
 		goto error;
 
 	/*
 	 * Build a SASLInitialResponse message, and send it.
 	 */
-	if (pqPutMsgStart(PqMsg_SASLInitialResponse, conn))
+	if (pqPutMsgStart('p', conn))
 		goto error;
 	if (pqPuts(selected_mechanism, conn))
 		goto error;
@@ -629,9 +629,10 @@ pg_SASL_continue(PGconn *conn, int payloadlen, bool final)
 {
 	char	   *output;
 	int			outputlen;
+	bool		done;
+	bool		success;
 	int			res;
 	char	   *challenge;
-	SASLStatus	status;
 
 	/* Read the SASL challenge from the AuthenticationSASLContinue message. */
 	challenge = malloc(payloadlen + 1);
@@ -650,12 +651,13 @@ pg_SASL_continue(PGconn *conn, int payloadlen, bool final)
 	/* For safety and convenience, ensure the buffer is NULL-terminated. */
 	challenge[payloadlen] = '\0';
 
-	status = conn->sasl->exchange(conn->sasl_state,
-								  challenge, payloadlen,
-								  &output, &outputlen);
+	conn->sasl->exchange(conn->sasl_state,
+						 challenge, payloadlen,
+						 &output, &outputlen,
+						 &done, &success);
 	free(challenge);			/* don't need the input anymore */
 
-	if (final && status == SASL_CONTINUE)
+	if (final && !done)
 	{
 		if (outputlen != 0)
 			free(output);
@@ -668,7 +670,7 @@ pg_SASL_continue(PGconn *conn, int payloadlen, bool final)
 	 * If the exchange is not completed yet, we need to make sure that the
 	 * SASL mechanism has generated a message to send back.
 	 */
-	if (output == NULL && status == SASL_CONTINUE)
+	if (output == NULL && !done)
 	{
 		libpq_append_conn_error(conn, "no client response found after SASL exchange success");
 		return STATUS_ERROR;
@@ -683,14 +685,14 @@ pg_SASL_continue(PGconn *conn, int payloadlen, bool final)
 		/*
 		 * Send the SASL response to the server.
 		 */
-		res = pqPacketSend(conn, PqMsg_SASLResponse, output, outputlen);
+		res = pqPacketSend(conn, 'p', output, outputlen);
 		free(output);
 
 		if (res != STATUS_OK)
 			return STATUS_ERROR;
 	}
 
-	if (status == SASL_FAILED)
+	if (done && !success)
 		return STATUS_ERROR;
 
 	return STATUS_OK;
@@ -754,8 +756,7 @@ pg_password_sendauth(PGconn *conn, const char *password, AuthRequest areq)
 		default:
 			return STATUS_ERROR;
 	}
-	ret = pqPacketSend(conn, PqMsg_PasswordMessage,
-					   pwd_to_send, strlen(pwd_to_send) + 1);
+	ret = pqPacketSend(conn, 'p', pwd_to_send, strlen(pwd_to_send) + 1);
 	free(crypt_pwd);
 	return ret;
 }
@@ -1179,6 +1180,15 @@ pg_fe_getusername(uid_t user_id, PQExpBuffer errorMessage)
 	char		pwdbuf[BUFSIZ];
 #endif
 
+	/*
+	 * Some users are using configure --enable-thread-safety-force, so we
+	 * might as well do the locking within our library to protect getpwuid().
+	 * In fact, application developers can use getpwuid() in their application
+	 * if they use the locking call we provide, or install their own locking
+	 * function using PQregisterThreadLock().
+	 */
+	pglock_thread();
+
 #ifdef WIN32
 	if (GetUserName(username, &namesize))
 		name = username;
@@ -1199,6 +1209,8 @@ pg_fe_getusername(uid_t user_id, PQExpBuffer errorMessage)
 		if (result == NULL && errorMessage)
 			libpq_append_error(errorMessage, "out of memory");
 	}
+
+	pgunlock_thread();
 
 	return result;
 }
@@ -1314,7 +1326,7 @@ PQencryptPasswordConn(PGconn *conn, const char *passwd, const char *user,
 		if (strlen(val) > MAX_ALGORITHM_NAME_LEN)
 		{
 			PQclear(res);
-			libpq_append_conn_error(conn, "\"password_encryption\" value too long");
+			libpq_append_conn_error(conn, "password_encryption value too long");
 			return NULL;
 		}
 		strcpy(algobuf, val);
@@ -1370,85 +1382,4 @@ PQencryptPasswordConn(PGconn *conn, const char *passwd, const char *user,
 	}
 
 	return crypt_pwd;
-}
-
-/*
- * PQchangePassword -- exported routine to change a password
- *
- * This is intended to be used by client applications that wish to
- * change the password for a user. The password is not sent in
- * cleartext because it is encrypted on the client side. This is
- * good because it ensures the cleartext password is never known by
- * the server, and therefore won't end up in logs, pg_stat displays,
- * etc. The password encryption is performed by PQencryptPasswordConn(),
- * which is passed a NULL for the algorithm argument. Hence encryption
- * is done according to the server's password_encryption
- * setting. We export the function so that clients won't be dependent
- * on the implementation specific details with respect to how the
- * server changes passwords.
- *
- * Arguments are a connection object, the SQL name of the target user,
- * and the cleartext password.
- *
- * Return value is the PGresult of the executed ALTER USER statement
- * or NULL if we never get there. The caller is responsible to PQclear()
- * the returned PGresult.
- *
- * PQresultStatus() should be called to check the return value for errors,
- * and PQerrorMessage() used to get more information about such errors.
- */
-PGresult *
-PQchangePassword(PGconn *conn, const char *user, const char *passwd)
-{
-	char	   *encrypted_password = PQencryptPasswordConn(conn, passwd,
-														   user, NULL);
-
-	if (!encrypted_password)
-	{
-		/* PQencryptPasswordConn() already registered the error */
-		return NULL;
-	}
-	else
-	{
-		char	   *fmtpw = PQescapeLiteral(conn, encrypted_password,
-											strlen(encrypted_password));
-
-		/* no longer needed, so clean up now */
-		PQfreemem(encrypted_password);
-
-		if (!fmtpw)
-		{
-			/* PQescapeLiteral() already registered the error */
-			return NULL;
-		}
-		else
-		{
-			char	   *fmtuser = PQescapeIdentifier(conn, user, strlen(user));
-
-			if (!fmtuser)
-			{
-				/* PQescapeIdentifier() already registered the error */
-				PQfreemem(fmtpw);
-				return NULL;
-			}
-			else
-			{
-				PQExpBufferData buf;
-				PGresult   *res;
-
-				initPQExpBuffer(&buf);
-				printfPQExpBuffer(&buf, "ALTER USER %s PASSWORD %s",
-								  fmtuser, fmtpw);
-
-				res = PQexec(conn, buf.data);
-
-				/* clean up */
-				termPQExpBuffer(&buf);
-				PQfreemem(fmtuser);
-				PQfreemem(fmtpw);
-
-				return res;
-			}
-		}
-	}
 }

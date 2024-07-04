@@ -104,6 +104,8 @@ include $(top_srcdir)/src/Makefile.shlib
 $(SQLSCRIPT): snowball_create.pl snowball_func.sql.in snowball.sql.in
 	$(PERL) $< --input ${srcdir} --outdir .
 
+distprep: $(SQLSCRIPT)
+
 install: all installdirs install-lib install-script
 	$(INSTALL_DATA) $(addprefix $(srcdir)/stopwords/,$(stop_files)) '$(DESTDIR)$(datadir)/$(DICTDIR)'
 
@@ -120,4 +122,6 @@ uninstall: uninstall-lib
 
 clean distclean: clean-lib
 	rm -f $(OBJS)
+
+maintainer-clean: distclean
 	rm -f $(SQLSCRIPT)

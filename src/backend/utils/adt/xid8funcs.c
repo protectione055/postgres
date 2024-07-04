@@ -15,7 +15,7 @@
  * to users.  The txid_XXX variants should eventually be dropped.
  *
  *
- *	Copyright (c) 2003-2024, PostgreSQL Global Development Group
+ *	Copyright (c) 2003-2023, PostgreSQL Global Development Group
  *	Author: Jan Wieck, Afilias USA INC.
  *	64-bit txids: Marko Kreen, Skype Technologies
  *
@@ -26,8 +26,10 @@
 
 #include "postgres.h"
 
+#include "access/clog.h"
 #include "access/transam.h"
 #include "access/xact.h"
+#include "access/xlog.h"
 #include "funcapi.h"
 #include "lib/qunique.h"
 #include "libpq/pqformat.h"
@@ -125,8 +127,8 @@ TransactionIdInRecentPast(FullTransactionId fxid, TransactionId *extracted_xid)
 						(unsigned long long) U64FromFullTransactionId(fxid))));
 
 	/*
-	 * TransamVariables->oldestClogXid is protected by XactTruncationLock, but
-	 * we don't acquire that lock here.  Instead, we require the caller to
+	 * ShmemVariableCache->oldestClogXid is protected by XactTruncationLock,
+	 * but we don't acquire that lock here.  Instead, we require the caller to
 	 * acquire it, because the caller is presumably going to look up the
 	 * returned XID.  If we took and released the lock within this function, a
 	 * CLOG truncation could occur before the caller finished with the XID.
@@ -134,13 +136,13 @@ TransactionIdInRecentPast(FullTransactionId fxid, TransactionId *extracted_xid)
 	Assert(LWLockHeldByMe(XactTruncationLock));
 
 	/*
-	 * If fxid is not older than TransamVariables->oldestClogXid, the relevant
-	 * CLOG entry is guaranteed to still exist.  Convert
-	 * TransamVariables->oldestClogXid into a FullTransactionId to compare it
-	 * with fxid.  Determine the right epoch knowing that oldest_fxid
+	 * If fxid is not older than ShmemVariableCache->oldestClogXid, the
+	 * relevant CLOG entry is guaranteed to still exist.  Convert
+	 * ShmemVariableCache->oldestClogXid into a FullTransactionId to compare
+	 * it with fxid.  Determine the right epoch knowing that oldest_fxid
 	 * shouldn't be more than 2^31 older than now_fullxid.
 	 */
-	oldest_xid = TransamVariables->oldestClogXid;
+	oldest_xid = ShmemVariableCache->oldestClogXid;
 	Assert(TransactionIdPrecedesOrEquals(oldest_xid, now_epoch_next_xid));
 	if (oldest_xid <= now_epoch_next_xid)
 	{

@@ -2,7 +2,7 @@
  *
  * PostgreSQL locale utilities
  *
- * Portions Copyright (c) 2002-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2002-2023, PostgreSQL Global Development Group
  *
  * src/backend/utils/adt/pg_locale.c
  *
@@ -56,6 +56,7 @@
 
 #include "access/htup_details.h"
 #include "catalog/pg_collation.h"
+#include "catalog/pg_control.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "utils/builtins.h"
@@ -155,43 +156,6 @@ static int32_t uchar_convert(UConverter *converter,
 							 const char *src, int32_t srclen);
 static void icu_set_collation_attributes(UCollator *collator, const char *loc,
 										 UErrorCode *status);
-#endif
-
-/*
- * POSIX doesn't define _l-variants of these functions, but several systems
- * have them.  We provide our own replacements here.
- */
-#ifndef HAVE_MBSTOWCS_L
-static size_t
-mbstowcs_l(wchar_t *dest, const char *src, size_t n, locale_t loc)
-{
-#ifdef WIN32
-	return _mbstowcs_l(dest, src, n, loc);
-#else
-	size_t		result;
-	locale_t	save_locale = uselocale(loc);
-
-	result = mbstowcs(dest, src, n);
-	uselocale(save_locale);
-	return result;
-#endif
-}
-#endif
-#ifndef HAVE_WCSTOMBS_L
-static size_t
-wcstombs_l(char *dest, const wchar_t *src, size_t n, locale_t loc)
-{
-#ifdef WIN32
-	return _wcstombs_l(dest, src, n, loc);
-#else
-	size_t		result;
-	locale_t	save_locale = uselocale(loc);
-
-	result = wcstombs(dest, src, n);
-	uselocale(save_locale);
-	return result;
-#endif
-}
 #endif
 
 /*
@@ -1268,18 +1232,7 @@ lookup_collation_cache(Oid collation, bool set_flags)
 			elog(ERROR, "cache lookup failed for collation %u", collation);
 		collform = (Form_pg_collation) GETSTRUCT(tp);
 
-		if (collform->collprovider == COLLPROVIDER_BUILTIN)
-		{
-			Datum		datum;
-			const char *colllocale;
-
-			datum = SysCacheGetAttrNotNull(COLLOID, tp, Anum_pg_collation_colllocale);
-			colllocale = TextDatumGetCString(datum);
-
-			cache_entry->collate_is_c = true;
-			cache_entry->ctype_is_c = (strcmp(colllocale, "C") == 0);
-		}
-		else if (collform->collprovider == COLLPROVIDER_LIBC)
+		if (collform->collprovider == COLLPROVIDER_LIBC)
 		{
 			Datum		datum;
 			const char *collcollate;
@@ -1330,30 +1283,16 @@ lc_collate_is_c(Oid collation)
 	if (collation == DEFAULT_COLLATION_OID)
 	{
 		static int	result = -1;
-		const char *localeptr;
+		char	   *localeptr;
+
+		if (default_locale.provider == COLLPROVIDER_ICU)
+			return false;
 
 		if (result >= 0)
 			return (bool) result;
-
-		if (default_locale.provider == COLLPROVIDER_BUILTIN)
-		{
-			result = true;
-			return (bool) result;
-		}
-		else if (default_locale.provider == COLLPROVIDER_ICU)
-		{
-			result = false;
-			return (bool) result;
-		}
-		else if (default_locale.provider == COLLPROVIDER_LIBC)
-		{
-			localeptr = setlocale(LC_CTYPE, NULL);
-			if (!localeptr)
-				elog(ERROR, "invalid LC_CTYPE setting");
-		}
-		else
-			elog(ERROR, "unexpected collation provider '%c'",
-				 default_locale.provider);
+		localeptr = setlocale(LC_COLLATE, NULL);
+		if (!localeptr)
+			elog(ERROR, "invalid LC_COLLATE setting");
 
 		if (strcmp(localeptr, "C") == 0)
 			result = true;
@@ -1397,29 +1336,16 @@ lc_ctype_is_c(Oid collation)
 	if (collation == DEFAULT_COLLATION_OID)
 	{
 		static int	result = -1;
-		const char *localeptr;
+		char	   *localeptr;
+
+		if (default_locale.provider == COLLPROVIDER_ICU)
+			return false;
 
 		if (result >= 0)
 			return (bool) result;
-
-		if (default_locale.provider == COLLPROVIDER_BUILTIN)
-		{
-			localeptr = default_locale.info.builtin.locale;
-		}
-		else if (default_locale.provider == COLLPROVIDER_ICU)
-		{
-			result = false;
-			return (bool) result;
-		}
-		else if (default_locale.provider == COLLPROVIDER_LIBC)
-		{
-			localeptr = setlocale(LC_CTYPE, NULL);
-			if (!localeptr)
-				elog(ERROR, "invalid LC_CTYPE setting");
-		}
-		else
-			elog(ERROR, "unexpected collation provider '%c'",
-				 default_locale.provider);
+		localeptr = setlocale(LC_CTYPE, NULL);
+		if (!localeptr)
+			elog(ERROR, "invalid LC_CTYPE setting");
 
 		if (strcmp(localeptr, "C") == 0)
 			result = true;
@@ -1481,8 +1407,7 @@ make_icu_collator(const char *iculocstr,
 								  UCOL_DEFAULT, UCOL_DEFAULT_STRENGTH, NULL, &status);
 		if (U_FAILURE(status))
 			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("could not open collator for locale \"%s\" with rules \"%s\": %s",
+					(errmsg("could not open collator for locale \"%s\" with rules \"%s\": %s",
 							iculocstr, icurules, u_errorName(status))));
 	}
 
@@ -1499,6 +1424,7 @@ make_icu_collator(const char *iculocstr,
 
 
 /* simple subroutine for reporting errors from newlocale() */
+#ifdef HAVE_LOCALE_T
 static void
 report_newlocale_failure(const char *localename)
 {
@@ -1527,6 +1453,7 @@ report_newlocale_failure(const char *localename)
 			  errdetail("The operating system could not find any locale data for the locale name \"%s\".",
 						localename) : 0)));
 }
+#endif							/* HAVE_LOCALE_T */
 
 bool
 pg_locale_deterministic(pg_locale_t locale)
@@ -1543,6 +1470,10 @@ pg_locale_deterministic(pg_locale_t locale)
  * lifetime of the backend.  Thus, do not free the result with freelocale().
  *
  * As a special optimization, the default/database collation returns 0.
+ * Callers should then revert to the non-locale_t-enabled code path.
+ * Also, callers should avoid calling this before going down a C/POSIX
+ * fastpath, because such a fastpath should work even on platforms without
+ * locale_t support in the C library.
  *
  * For simplicity, we always generate COLLATE + CTYPE even though we
  * might only need one of them.  Since this is called only once per session,
@@ -1558,10 +1489,10 @@ pg_newlocale_from_collation(Oid collid)
 
 	if (collid == DEFAULT_COLLATION_OID)
 	{
-		if (default_locale.provider == COLLPROVIDER_LIBC)
-			return (pg_locale_t) 0;
-		else
+		if (default_locale.provider == COLLPROVIDER_ICU)
 			return &default_locale;
+		else
+			return (pg_locale_t) 0;
 	}
 
 	cache_entry = lookup_collation_cache(collid, false);
@@ -1586,20 +1517,9 @@ pg_newlocale_from_collation(Oid collid)
 		result.provider = collform->collprovider;
 		result.deterministic = collform->collisdeterministic;
 
-		if (collform->collprovider == COLLPROVIDER_BUILTIN)
+		if (collform->collprovider == COLLPROVIDER_LIBC)
 		{
-			const char *locstr;
-
-			datum = SysCacheGetAttrNotNull(COLLOID, tp, Anum_pg_collation_colllocale);
-			locstr = TextDatumGetCString(datum);
-
-			builtin_validate_locale(GetDatabaseEncoding(), locstr);
-
-			result.info.builtin.locale = MemoryContextStrdup(TopMemoryContext,
-															 locstr);
-		}
-		else if (collform->collprovider == COLLPROVIDER_LIBC)
-		{
+#ifdef HAVE_LOCALE_T
 			const char *collcollate;
 			const char *collctype pg_attribute_unused();
 			locale_t	loc;
@@ -1650,13 +1570,19 @@ pg_newlocale_from_collation(Oid collid)
 			}
 
 			result.info.lt = loc;
+#else							/* not HAVE_LOCALE_T */
+			/* platform that doesn't support locale_t */
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("collation provider LIBC is not supported on this platform")));
+#endif							/* not HAVE_LOCALE_T */
 		}
 		else if (collform->collprovider == COLLPROVIDER_ICU)
 		{
 			const char *iculocstr;
 			const char *icurules;
 
-			datum = SysCacheGetAttrNotNull(COLLOID, tp, Anum_pg_collation_colllocale);
+			datum = SysCacheGetAttrNotNull(COLLOID, tp, Anum_pg_collation_colliculocale);
 			iculocstr = TextDatumGetCString(datum);
 
 			datum = SysCacheGetAttr(COLLOID, tp, Anum_pg_collation_collicurules, &isnull);
@@ -1677,10 +1603,7 @@ pg_newlocale_from_collation(Oid collid)
 
 			collversionstr = TextDatumGetCString(datum);
 
-			if (collform->collprovider == COLLPROVIDER_LIBC)
-				datum = SysCacheGetAttrNotNull(COLLOID, tp, Anum_pg_collation_collcollate);
-			else
-				datum = SysCacheGetAttrNotNull(COLLOID, tp, Anum_pg_collation_colllocale);
+			datum = SysCacheGetAttrNotNull(COLLOID, tp, collform->collprovider == COLLPROVIDER_ICU ? Anum_pg_collation_colliculocale : Anum_pg_collation_collcollate);
 
 			actual_versionstr = get_collation_actual_version(collform->collprovider,
 															 TextDatumGetCString(datum));
@@ -1730,26 +1653,6 @@ char *
 get_collation_actual_version(char collprovider, const char *collcollate)
 {
 	char	   *collversion = NULL;
-
-	/*
-	 * The only two supported locales (C and C.UTF-8) are both based on memcmp
-	 * and are not expected to change, but track the version anyway.
-	 *
-	 * Note that the character semantics may change for some locales, but the
-	 * collation version only tracks changes to sort order.
-	 */
-	if (collprovider == COLLPROVIDER_BUILTIN)
-	{
-		if (strcmp(collcollate, "C") == 0)
-			return "1";
-		else if (strcmp(collcollate, "C.UTF-8") == 0)
-			return "1";
-		else
-			ereport(ERROR,
-					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg("invalid locale name \"%s\" for builtin provider",
-							collcollate)));
-	}
 
 #ifdef USE_ICU
 	if (collprovider == COLLPROVIDER_ICU)
@@ -1889,9 +1792,11 @@ pg_strncoll_libc_win32_utf8(const char *arg1, size_t len1, const char *arg2,
 	((LPWSTR) a2p)[r] = 0;
 
 	errno = 0;
+#ifdef HAVE_LOCALE_T
 	if (locale)
 		result = wcscoll_l((LPWSTR) a1p, (LPWSTR) a2p, locale->info.lt);
 	else
+#endif
 		result = wcscoll((LPWSTR) a1p, (LPWSTR) a2p);
 	if (result == 2147483647)	/* _NLSCMPERROR; missing from mingw headers */
 		ereport(ERROR,
@@ -1930,7 +1835,14 @@ pg_strcoll_libc(const char *arg1, const char *arg2, pg_locale_t locale)
 	else
 #endif							/* WIN32 */
 	if (locale)
+	{
+#ifdef HAVE_LOCALE_T
 		result = strcoll_l(arg1, arg2, locale->info.lt);
+#else
+		/* shouldn't happen */
+		elog(ERROR, "unsupported collprovider: %c", locale->provider);
+#endif
+	}
 	else
 		result = strcoll(arg1, arg2);
 
@@ -2157,9 +2069,11 @@ pg_strxfrm_libc(char *dest, const char *src, size_t destsize,
 	Assert(!locale || locale->provider == COLLPROVIDER_LIBC);
 
 #ifdef TRUST_STRXFRM
+#ifdef HAVE_LOCALE_T
 	if (locale)
 		return strxfrm_l(dest, src, destsize, locale->info.lt);
 	else
+#endif
 		return strxfrm(dest, src, destsize);
 #else
 	/* shouldn't happen */
@@ -2517,59 +2431,6 @@ pg_strnxfrm_prefix(char *dest, size_t destsize, const char *src,
 	return result;
 }
 
-/*
- * Return required encoding ID for the given locale, or -1 if any encoding is
- * valid for the locale.
- */
-int
-builtin_locale_encoding(const char *locale)
-{
-	if (strcmp(locale, "C") == 0)
-		return -1;
-	if (strcmp(locale, "C.UTF-8") == 0)
-		return PG_UTF8;
-
-	ereport(ERROR,
-			(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-			 errmsg("invalid locale name \"%s\" for builtin provider",
-					locale)));
-
-	return 0;					/* keep compiler quiet */
-}
-
-
-/*
- * Validate the locale and encoding combination, and return the canonical form
- * of the locale name.
- */
-const char *
-builtin_validate_locale(int encoding, const char *locale)
-{
-	const char *canonical_name = NULL;
-	int			required_encoding;
-
-	if (strcmp(locale, "C") == 0)
-		canonical_name = "C";
-	else if (strcmp(locale, "C.UTF-8") == 0 || strcmp(locale, "C.UTF8") == 0)
-		canonical_name = "C.UTF-8";
-
-	if (!canonical_name)
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("invalid locale name \"%s\" for builtin provider",
-						locale)));
-
-	required_encoding = builtin_locale_encoding(canonical_name);
-	if (required_encoding >= 0 && encoding != required_encoding)
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("encoding \"%s\" does not match locale \"%s\"",
-						pg_encoding_to_char(encoding), locale)));
-
-	return canonical_name;
-}
-
-
 #ifdef USE_ICU
 
 /*
@@ -2610,8 +2471,7 @@ pg_ucol_open(const char *loc_str)
 		if (U_FAILURE(status) || status == U_STRING_NOT_TERMINATED_WARNING)
 		{
 			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("could not get language from locale \"%s\": %s",
+					(errmsg("could not get language from locale \"%s\": %s",
 							loc_str, u_errorName(status))));
 		}
 
@@ -2632,8 +2492,7 @@ pg_ucol_open(const char *loc_str)
 	if (U_FAILURE(status))
 		ereport(ERROR,
 		/* use original string for error report */
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("could not open collator for locale \"%s\": %s",
+				(errmsg("could not open collator for locale \"%s\": %s",
 						orig_str, u_errorName(status))));
 
 	if (U_ICU_VERSION_MAJOR_NUM < 54)
@@ -2649,8 +2508,7 @@ pg_ucol_open(const char *loc_str)
 		{
 			ucol_close(collator);
 			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("could not open collator for locale \"%s\": %s",
+					(errmsg("could not open collator for locale \"%s\": %s",
 							orig_str, u_errorName(status))));
 		}
 	}
@@ -2961,8 +2819,7 @@ icu_language_tag(const char *loc_str, int elevel)
 
 		if (elevel > 0)
 			ereport(elevel,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("could not convert locale name \"%s\" to language tag: %s",
+					(errmsg("could not convert locale name \"%s\" to language tag: %s",
 							loc_str, u_errorName(status))));
 		return NULL;
 	}
@@ -3003,8 +2860,7 @@ icu_validate_locale(const char *loc_str)
 	if (U_FAILURE(status) || status == U_STRING_NOT_TERMINATED_WARNING)
 	{
 		ereport(elevel,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("could not get language from ICU locale \"%s\": %s",
+				(errmsg("could not get language from ICU locale \"%s\": %s",
 						loc_str, u_errorName(status)),
 				 errhint("To disable ICU locale validation, set the parameter \"%s\" to \"%s\".",
 						 "icu_validation_level", "disabled")));
@@ -3033,8 +2889,7 @@ icu_validate_locale(const char *loc_str)
 
 	if (!found)
 		ereport(elevel,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("ICU locale \"%s\" has unknown language \"%s\"",
+				(errmsg("ICU locale \"%s\" has unknown language \"%s\"",
 						loc_str, lang),
 				 errhint("To disable ICU locale validation, set the parameter \"%s\" to \"%s\".",
 						 "icu_validation_level", "disabled")));
@@ -3102,8 +2957,23 @@ wchar2char(char *to, const wchar_t *from, size_t tolen, pg_locale_t locale)
 	}
 	else
 	{
+#ifdef HAVE_LOCALE_T
+#ifdef HAVE_WCSTOMBS_L
 		/* Use wcstombs_l for nondefault locales */
 		result = wcstombs_l(to, from, tolen, locale->info.lt);
+#else							/* !HAVE_WCSTOMBS_L */
+		/* We have to temporarily set the locale as current ... ugh */
+		locale_t	save_locale = uselocale(locale->info.lt);
+
+		result = wcstombs(to, from, tolen);
+
+		uselocale(save_locale);
+#endif							/* HAVE_WCSTOMBS_L */
+#else							/* !HAVE_LOCALE_T */
+		/* Can't have locale != 0 without HAVE_LOCALE_T */
+		elog(ERROR, "wcstombs_l is not available");
+		result = 0;				/* keep compiler quiet */
+#endif							/* HAVE_LOCALE_T */
 	}
 
 	return result;
@@ -3164,8 +3034,23 @@ char2wchar(wchar_t *to, size_t tolen, const char *from, size_t fromlen,
 		}
 		else
 		{
+#ifdef HAVE_LOCALE_T
+#ifdef HAVE_MBSTOWCS_L
 			/* Use mbstowcs_l for nondefault locales */
 			result = mbstowcs_l(to, str, tolen, locale->info.lt);
+#else							/* !HAVE_MBSTOWCS_L */
+			/* We have to temporarily set the locale as current ... ugh */
+			locale_t	save_locale = uselocale(locale->info.lt);
+
+			result = mbstowcs(to, str, tolen);
+
+			uselocale(save_locale);
+#endif							/* HAVE_MBSTOWCS_L */
+#else							/* !HAVE_LOCALE_T */
+			/* Can't have locale != 0 without HAVE_LOCALE_T */
+			elog(ERROR, "mbstowcs_l is not available");
+			result = 0;			/* keep compiler quiet */
+#endif							/* HAVE_LOCALE_T */
 		}
 
 		pfree(str);

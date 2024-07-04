@@ -16,7 +16,7 @@
  *		contents of records in here except turning them into a more usable
  *		format.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -26,19 +26,22 @@
  */
 #include "postgres.h"
 
+#include "access/heapam.h"
 #include "access/heapam_xlog.h"
 #include "access/transam.h"
 #include "access/xact.h"
 #include "access/xlog_internal.h"
 #include "access/xlogreader.h"
 #include "access/xlogrecord.h"
+#include "access/xlogutils.h"
 #include "catalog/pg_control.h"
 #include "replication/decode.h"
 #include "replication/logical.h"
 #include "replication/message.h"
+#include "replication/origin.h"
 #include "replication/reorderbuffer.h"
 #include "replication/snapbuild.h"
-#include "storage/standbydefs.h"
+#include "storage/standby.h"
 
 /* individual record(group)'s handlers */
 static void DecodeInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf);
@@ -59,7 +62,7 @@ static void DecodePrepare(LogicalDecodingContext *ctx, XLogRecordBuffer *buf,
 
 
 /* common function to decode tuples */
-static void DecodeXLogTuple(char *data, Size len, HeapTuple tuple);
+static void DecodeXLogTuple(char *data, Size len, ReorderBufferTupleBuf *tuple);
 
 /* helper functions for decoding transactions */
 static inline bool FilterPrepare(LogicalDecodingContext *ctx,
@@ -174,7 +177,7 @@ xlog_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 					Assert(RecoveryInProgress());
 					ereport(ERROR,
 							(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-							 errmsg("logical decoding on standby requires \"wal_level\" >= \"logical\" on the primary")));
+							 errmsg("logical decoding on standby requires wal_level >= logical on the primary")));
 				}
 				break;
 			}
@@ -187,7 +190,6 @@ xlog_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		case XLOG_FPI_FOR_HINT:
 		case XLOG_FPI:
 		case XLOG_OVERWRITE_CONTRECORD:
-		case XLOG_CHECKPOINT_REDO:
 			break;
 		default:
 			elog(ERROR, "unexpected RM_XLOG_ID record type: %u", info);
@@ -301,13 +303,12 @@ xact_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 					ReorderBufferXidSetCatalogChanges(ctx->reorder, xid,
 													  buf->origptr);
 				}
-				else if (!ctx->fast_forward)
+				else if ((!ctx->fast_forward))
 					ReorderBufferImmediateInvalidation(ctx->reorder,
 													   invals->nmsgs,
 													   invals->msgs);
-
-				break;
 			}
+			break;
 		case XLOG_XACT_PREPARE:
 			{
 				xl_xact_parsed_prepare parsed;
@@ -421,7 +422,8 @@ heap2_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	switch (info)
 	{
 		case XLOG_HEAP2_MULTI_INSERT:
-			if (SnapBuildProcessChange(builder, xid, buf->origptr))
+			if (!ctx->fast_forward &&
+				SnapBuildProcessChange(builder, xid, buf->origptr))
 				DecodeMultiInsert(ctx, buf);
 			break;
 		case XLOG_HEAP2_NEW_CID:
@@ -446,9 +448,9 @@ heap2_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 			 * Everything else here is just low level physical stuff we're not
 			 * interested in.
 			 */
-		case XLOG_HEAP2_PRUNE_ON_ACCESS:
-		case XLOG_HEAP2_PRUNE_VACUUM_SCAN:
-		case XLOG_HEAP2_PRUNE_VACUUM_CLEANUP:
+		case XLOG_HEAP2_FREEZE_PAGE:
+		case XLOG_HEAP2_PRUNE:
+		case XLOG_HEAP2_VACUUM:
 		case XLOG_HEAP2_VISIBLE:
 		case XLOG_HEAP2_LOCK_UPDATED:
 			break;
@@ -598,8 +600,12 @@ logicalmsg_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 
 	ReorderBufferProcessXid(ctx->reorder, XLogRecGetXid(r), buf->origptr);
 
-	/* If we don't have snapshot, there is no point in decoding messages */
-	if (SnapBuildCurrentState(builder) < SNAPBUILD_FULL_SNAPSHOT)
+	/*
+	 * If we don't have snapshot or we are just fast-forwarding, there is no
+	 * point in decoding messages.
+	 */
+	if (SnapBuildCurrentState(builder) < SNAPBUILD_FULL_SNAPSHOT ||
+		ctx->fast_forward)
 		return;
 
 	message = (xl_logical_message *) XLogRecGetData(r);
@@ -615,26 +621,6 @@ logicalmsg_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 			 (SnapBuildCurrentState(builder) != SNAPBUILD_CONSISTENT ||
 			  SnapBuildXactNeedsSkip(builder, buf->origptr)))
 		return;
-
-	/*
-	 * We also skip decoding in fast_forward mode. This check must be last
-	 * because we don't want to set the processing_required flag unless we
-	 * have a decodable message.
-	 */
-	if (ctx->fast_forward)
-	{
-		/*
-		 * We need to set processing_required flag to notify the message's
-		 * existence to the caller. Usually, the flag is set when either the
-		 * COMMIT or ABORT records are decoded, but this must be turned on
-		 * here because the non-transactional logical message is decoded
-		 * without waiting for these records.
-		 */
-		if (!message->transactional)
-			ctx->processing_required = true;
-
-		return;
-	}
 
 	/*
 	 * If this is a non-transactional change, get the snapshot we're expected
@@ -888,7 +874,7 @@ DecodeAbort(LogicalDecodingContext *ctx, XLogRecordBuffer *buf,
 /*
  * Parse XLOG_HEAP_INSERT (not MULTI_INSERT!) records into tuplebufs.
  *
- * Inserts can contain the new tuple.
+ * Deletes can contain the new tuple.
  */
 static void
 DecodeInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
@@ -1104,7 +1090,7 @@ DecodeTruncate(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 }
 
 /*
- * Decode XLOG_HEAP2_MULTI_INSERT record into multiple tuplebufs.
+ * Decode XLOG_HEAP2_MULTI_INSERT_insert record into multiple tuplebufs.
  *
  * Currently MULTI_INSERT will always contain the full tuples.
  */
@@ -1150,7 +1136,7 @@ DecodeMultiInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		ReorderBufferChange *change;
 		xl_multi_insert_tuple *xlhdr;
 		int			datalen;
-		HeapTuple	tuple;
+		ReorderBufferTupleBuf *tuple;
 		HeapTupleHeader header;
 
 		change = ReorderBufferGetChange(ctx->reorder);
@@ -1167,21 +1153,21 @@ DecodeMultiInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 			ReorderBufferGetTupleBuf(ctx->reorder, datalen);
 
 		tuple = change->data.tp.newtuple;
-		header = tuple->t_data;
+		header = tuple->tuple.t_data;
 
 		/* not a disk based tuple */
-		ItemPointerSetInvalid(&tuple->t_self);
+		ItemPointerSetInvalid(&tuple->tuple.t_self);
 
 		/*
 		 * We can only figure this out after reassembling the transactions.
 		 */
-		tuple->t_tableOid = InvalidOid;
+		tuple->tuple.t_tableOid = InvalidOid;
 
-		tuple->t_len = datalen + SizeofHeapTupleHeader;
+		tuple->tuple.t_len = datalen + SizeofHeapTupleHeader;
 
 		memset(header, 0, SizeofHeapTupleHeader);
 
-		memcpy((char *) tuple->t_data + SizeofHeapTupleHeader,
+		memcpy((char *) tuple->tuple.t_data + SizeofHeapTupleHeader,
 			   (char *) data,
 			   datalen);
 		header->t_infomask = xlhdr->t_infomask;
@@ -1251,7 +1237,7 @@ DecodeSpecConfirm(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
  * computed outside as they are record specific.
  */
 static void
-DecodeXLogTuple(char *data, Size len, HeapTuple tuple)
+DecodeXLogTuple(char *data, Size len, ReorderBufferTupleBuf *tuple)
 {
 	xl_heap_header xlhdr;
 	int			datalen = len - SizeOfHeapHeader;
@@ -1259,14 +1245,14 @@ DecodeXLogTuple(char *data, Size len, HeapTuple tuple)
 
 	Assert(datalen >= 0);
 
-	tuple->t_len = datalen + SizeofHeapTupleHeader;
-	header = tuple->t_data;
+	tuple->tuple.t_len = datalen + SizeofHeapTupleHeader;
+	header = tuple->tuple.t_data;
 
 	/* not a disk based tuple */
-	ItemPointerSetInvalid(&tuple->t_self);
+	ItemPointerSetInvalid(&tuple->tuple.t_self);
 
 	/* we can only figure this out after reassembling the transactions */
-	tuple->t_tableOid = InvalidOid;
+	tuple->tuple.t_tableOid = InvalidOid;
 
 	/* data is not stored aligned, copy to aligned storage */
 	memcpy((char *) &xlhdr,
@@ -1275,7 +1261,7 @@ DecodeXLogTuple(char *data, Size len, HeapTuple tuple)
 
 	memset(header, 0, SizeofHeapTupleHeader);
 
-	memcpy(((char *) tuple->t_data) + SizeofHeapTupleHeader,
+	memcpy(((char *) tuple->tuple.t_data) + SizeofHeapTupleHeader,
 		   data + SizeOfHeapHeader,
 		   datalen);
 
@@ -1300,21 +1286,7 @@ static bool
 DecodeTXNNeedSkip(LogicalDecodingContext *ctx, XLogRecordBuffer *buf,
 				  Oid txn_dbid, RepOriginId origin_id)
 {
-	if (SnapBuildXactNeedsSkip(ctx->snapshot_builder, buf->origptr) ||
-		(txn_dbid != InvalidOid && txn_dbid != ctx->slot->data.database) ||
-		FilterByOrigin(ctx, origin_id))
-		return true;
-
-	/*
-	 * We also skip decoding in fast_forward mode. In passing set the
-	 * processing_required flag to indicate that if it were not for
-	 * fast_forward mode, processing would have been required.
-	 */
-	if (ctx->fast_forward)
-	{
-		ctx->processing_required = true;
-		return true;
-	}
-
-	return false;
+	return (SnapBuildXactNeedsSkip(ctx->snapshot_builder, buf->origptr) ||
+			(txn_dbid != InvalidOid && txn_dbid != ctx->slot->data.database) ||
+			ctx->fast_forward || FilterByOrigin(ctx, origin_id));
 }

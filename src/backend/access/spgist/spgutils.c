@@ -4,7 +4,7 @@
  *	  various support functions for SP-GiST
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -28,11 +28,11 @@
 #include "parser/parse_coerce.h"
 #include "storage/bufmgr.h"
 #include "storage/indexfsm.h"
+#include "storage/lmgr.h"
+#include "utils/builtins.h"
 #include "utils/catcache.h"
-#include "utils/fmgrprotos.h"
 #include "utils/index_selfuncs.h"
 #include "utils/lsyscache.h"
-#include "utils/rel.h"
 #include "utils/syscache.h"
 
 
@@ -60,7 +60,6 @@ spghandler(PG_FUNCTION_ARGS)
 	amroutine->amclusterable = false;
 	amroutine->ampredlocks = false;
 	amroutine->amcanparallel = false;
-	amroutine->amcanbuildparallel = false;
 	amroutine->amcaninclude = true;
 	amroutine->amusemaintenanceworkmem = false;
 	amroutine->amsummarizing = false;
@@ -71,7 +70,6 @@ spghandler(PG_FUNCTION_ARGS)
 	amroutine->ambuild = spgbuild;
 	amroutine->ambuildempty = spgbuildempty;
 	amroutine->aminsert = spginsert;
-	amroutine->aminsertcleanup = NULL;
 	amroutine->ambulkdelete = spgbulkdelete;
 	amroutine->amvacuumcleanup = spgvacuumcleanup;
 	amroutine->amcanreturn = spgcanreturn;
@@ -358,19 +356,8 @@ initSpGistState(SpGistState *state, Relation index)
 	/* Make workspace for constructing dead tuples */
 	state->deadTupleStorage = palloc0(SGDTSIZE);
 
-	/*
-	 * Set horizon XID to use in redirection tuples.  Use our own XID if we
-	 * have one, else use InvalidTransactionId.  The latter case can happen in
-	 * VACUUM or REINDEX CONCURRENTLY, and in neither case would it be okay to
-	 * force an XID to be assigned.  VACUUM won't create any redirection
-	 * tuples anyway, but REINDEX CONCURRENTLY can.  Fortunately, REINDEX
-	 * CONCURRENTLY doesn't mark the index valid until the end, so there could
-	 * never be any concurrent scans "in flight" to a redirection tuple it has
-	 * inserted.  And it locks out VACUUM until the end, too.  So it's okay
-	 * for VACUUM to immediately expire a redirection tuple that contains an
-	 * invalid xid.
-	 */
-	state->redirectXid = GetTopTransactionIdIfAny();
+	/* Set XID to use in redirection tuples */
+	state->myXid = GetTopTransactionIdIfAny();
 
 	/* Assume we're not in an index build (spgbuild will override) */
 	state->isBuild = false;
@@ -808,7 +795,7 @@ memcpyInnerDatum(void *target, SpGistTypeDesc *att, Datum datum)
  */
 Size
 SpGistGetLeafTupleSize(TupleDesc tupleDescriptor,
-					   const Datum *datums, const bool *isnulls)
+					   Datum *datums, bool *isnulls)
 {
 	Size		size;
 	Size		data_size;
@@ -861,7 +848,7 @@ SpGistGetLeafTupleSize(TupleDesc tupleDescriptor,
  */
 SpGistLeafTuple
 spgFormLeafTuple(SpGistState *state, ItemPointer heapPtr,
-				 const Datum *datums, const bool *isnulls)
+				 Datum *datums, bool *isnulls)
 {
 	SpGistLeafTuple tup;
 	TupleDesc	tupleDescriptor = state->leafTupDesc;
@@ -1086,7 +1073,8 @@ spgFormDeadTuple(SpGistState *state, int tupstate,
 	if (tupstate == SPGIST_REDIRECT)
 	{
 		ItemPointerSet(&tuple->pointer, blkno, offnum);
-		tuple->xid = state->redirectXid;
+		Assert(TransactionIdIsValid(state->myXid));
+		tuple->xid = state->myXid;
 	}
 	else
 	{

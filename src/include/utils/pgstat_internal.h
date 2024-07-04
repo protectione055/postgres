@@ -5,7 +5,7 @@
  * only be needed by files implementing statistics support (rather than ones
  * reporting / querying stats).
  *
- * Copyright (c) 2001-2024, PostgreSQL Global Development Group
+ * Copyright (c) 2001-2023, PostgreSQL Global Development Group
  *
  * src/include/utils/pgstat_internal.h
  * ----------
@@ -14,7 +14,7 @@
 #define PGSTAT_INTERNAL_H
 
 
-#include "common/hashfn_unstable.h"
+#include "common/hashfn.h"
 #include "lib/dshash.h"
 #include "lib/ilist.h"
 #include "pgstat.h"
@@ -194,16 +194,16 @@ typedef struct PgStat_KindInfo
 	bool		accessed_across_databases:1;
 
 	/*
+	 * For variable-numbered stats: Identified on-disk using a name, rather
+	 * than PgStat_HashKey. Probably only needed for replication slot stats.
+	 */
+	bool		named_on_disk:1;
+
+	/*
 	 * The size of an entry in the shared stats hash table (pointed to by
 	 * PgStatShared_HashEntry->body).
 	 */
 	uint32		shared_size;
-
-	/*
-	 * The offset of the statistics struct in the containing shared memory
-	 * control structure PgStat_ShmemControl, for fixed-numbered statistics.
-	 */
-	uint32		shared_ctl_off;
 
 	/*
 	 * The offset/size of statistics inside the shared stats entry. Used when
@@ -239,7 +239,7 @@ typedef struct PgStat_KindInfo
 	void		(*reset_timestamp_cb) (PgStatShared_Common *header, TimestampTz ts);
 
 	/*
-	 * For variable-numbered stats. Optional.
+	 * For variable-numbered stats with named_on_disk. Optional.
 	 */
 	void		(*to_serialized_name) (const PgStat_HashKey *key,
 									   const PgStatShared_Common *header, NameData *name);
@@ -269,13 +269,13 @@ typedef struct PgStat_KindInfo
  * definitions.
  */
 static const char *const slru_names[] = {
-	"commit_timestamp",
-	"multixact_member",
-	"multixact_offset",
-	"notify",
-	"serializable",
-	"subtransaction",
-	"transaction",
+	"CommitTs",
+	"MultiXactMember",
+	"MultiXactOffset",
+	"Notify",
+	"Serial",
+	"Subtrans",
+	"Xact",
 	"other"						/* has to be last */
 };
 
@@ -776,10 +776,16 @@ pgstat_cmp_hash_key(const void *a, const void *b, size_t size, void *arg)
 static inline uint32
 pgstat_hash_hash_key(const void *d, size_t size, void *arg)
 {
-	const char *key = (const char *) d;
+	const PgStat_HashKey *key = (PgStat_HashKey *) d;
+	uint32		hash;
 
 	Assert(size == sizeof(PgStat_HashKey) && arg == NULL);
-	return fasthash32(key, size, 0);
+
+	hash = murmurhash32(key->kind);
+	hash = hash_combine(hash, murmurhash32(key->dboid));
+	hash = hash_combine(hash, murmurhash32(key->objoid));
+
+	return hash;
 }
 
 /*

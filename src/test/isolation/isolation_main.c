@@ -2,7 +2,7 @@
  *
  * isolation_main --- pg_regress test launcher for isolation tests
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/test/isolation/isolation_main.c
@@ -12,12 +12,11 @@
 
 #include "postgres_fe.h"
 
-#include "lib/stringinfo.h"
 #include "pg_regress.h"
 
-static char saved_argv0[MAXPGPATH];
-static char isolation_exec[MAXPGPATH];
-static bool looked_up_isolation_exec = false;
+char		saved_argv0[MAXPGPATH];
+char		isolation_exec[MAXPGPATH];
+bool		looked_up_isolation_exec = false;
 
 #define PG_ISOLATION_VERSIONSTR "isolationtester (PostgreSQL) " PG_VERSION "\n"
 
@@ -35,7 +34,8 @@ isolation_start_test(const char *testname,
 	char		infile[MAXPGPATH];
 	char		outfile[MAXPGPATH];
 	char		expectfile[MAXPGPATH];
-	StringInfoData psql_cmd;
+	char		psql_cmd[MAXPGPATH * 3];
+	size_t		offset = 0;
 	char	   *appnameenv;
 
 	/* need to do the path lookup here, check isolation_init() for details */
@@ -75,23 +75,34 @@ isolation_start_test(const char *testname,
 	add_stringlist_item(resultfiles, outfile);
 	add_stringlist_item(expectfiles, expectfile);
 
-	initStringInfo(&psql_cmd);
-
 	if (launcher)
-		appendStringInfo(&psql_cmd, "%s ", launcher);
+	{
+		offset += snprintf(psql_cmd + offset, sizeof(psql_cmd) - offset,
+						   "%s ", launcher);
+		if (offset >= sizeof(psql_cmd))
+		{
+			fprintf(stderr, _("command too long\n"));
+			exit(2);
+		}
+	}
 
-	appendStringInfo(&psql_cmd,
-					 "\"%s\" \"dbname=%s\" < \"%s\" > \"%s\" 2>&1",
-					 isolation_exec,
-					 dblist->str,
-					 infile,
-					 outfile);
+	offset += snprintf(psql_cmd + offset, sizeof(psql_cmd) - offset,
+					   "\"%s\" \"dbname=%s\" < \"%s\" > \"%s\" 2>&1",
+					   isolation_exec,
+					   dblist->str,
+					   infile,
+					   outfile);
+	if (offset >= sizeof(psql_cmd))
+	{
+		fprintf(stderr, _("command too long\n"));
+		exit(2);
+	}
 
 	appnameenv = psprintf("isolation/%s", testname);
 	setenv("PGAPPNAME", appnameenv, 1);
 	free(appnameenv);
 
-	pid = spawn_process(psql_cmd.data);
+	pid = spawn_process(psql_cmd);
 
 	if (pid == INVALID_PID)
 	{
@@ -101,8 +112,6 @@ isolation_start_test(const char *testname,
 	}
 
 	unsetenv("PGAPPNAME");
-
-	pfree(psql_cmd.data);
 
 	return pid;
 }

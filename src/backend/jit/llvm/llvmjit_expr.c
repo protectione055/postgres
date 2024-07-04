@@ -3,7 +3,7 @@
  * llvmjit_expr.c
  *	  JIT compile expressions.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -122,9 +122,7 @@ llvm_compile_expr(ExprState *state)
 	LLVMValueRef v_aggnulls;
 
 	instr_time	starttime;
-	instr_time	deform_starttime;
 	instr_time	endtime;
-	instr_time	deform_endtime;
 
 	llvm_enter_fatal_on_oom();
 
@@ -355,14 +353,10 @@ llvm_compile_expr(ExprState *state)
 					 */
 					if (tts_ops && desc && (context->base.flags & PGJIT_DEFORM))
 					{
-						INSTR_TIME_SET_CURRENT(deform_starttime);
 						l_jit_deform =
 							slot_compile_deform(context, desc,
 												tts_ops,
 												op->d.fetch.last_var);
-						INSTR_TIME_SET_CURRENT(deform_endtime);
-						INSTR_TIME_ACCUM_DIFF(context->base.instr.deform_counter,
-											  deform_endtime, deform_starttime);
 					}
 
 					if (l_jit_deform)
@@ -1431,12 +1425,6 @@ llvm_compile_expr(ExprState *state)
 					break;
 				}
 
-			case EEOP_IOCOERCE_SAFE:
-				build_EvalXFunc(b, mod, "ExecEvalCoerceViaIOSafe",
-								v_state, op);
-				LLVMBuildBr(b, opblocks[opno + 1]);
-				break;
-
 			case EEOP_DISTINCT:
 			case EEOP_NOT_DISTINCT:
 				{
@@ -1930,114 +1918,6 @@ llvm_compile_expr(ExprState *state)
 				LLVMBuildBr(b, opblocks[opno + 1]);
 				break;
 
-			case EEOP_JSONEXPR_PATH:
-				{
-					JsonExprState *jsestate = op->d.jsonexpr.jsestate;
-					LLVMValueRef v_ret;
-
-					/*
-					 * Call ExecEvalJsonExprPath().  It returns the address of
-					 * the step to perform next.
-					 */
-					v_ret = build_EvalXFunc(b, mod, "ExecEvalJsonExprPath",
-											v_state, op, v_econtext);
-
-					/*
-					 * Build a switch to map the return value (v_ret above),
-					 * which is a runtime value of the step address to perform
-					 * next, to either jump_empty, jump_error,
-					 * jump_eval_coercion, or jump_end.
-					 */
-					if (jsestate->jump_empty >= 0 ||
-						jsestate->jump_error >= 0 ||
-						jsestate->jump_eval_coercion >= 0)
-					{
-						LLVMValueRef v_jump_empty;
-						LLVMValueRef v_jump_error;
-						LLVMValueRef v_jump_coercion;
-						LLVMValueRef v_switch;
-						LLVMBasicBlockRef b_done,
-									b_empty,
-									b_error,
-									b_coercion;
-
-						b_empty =
-							l_bb_before_v(opblocks[opno + 1],
-										  "op.%d.jsonexpr_empty", opno);
-						b_error =
-							l_bb_before_v(opblocks[opno + 1],
-										  "op.%d.jsonexpr_error", opno);
-						b_coercion =
-							l_bb_before_v(opblocks[opno + 1],
-										  "op.%d.jsonexpr_coercion", opno);
-						b_done =
-							l_bb_before_v(opblocks[opno + 1],
-										  "op.%d.jsonexpr_done", opno);
-
-						v_switch = LLVMBuildSwitch(b,
-												   v_ret,
-												   b_done,
-												   3);
-						/* Returned jsestate->jump_empty? */
-						if (jsestate->jump_empty >= 0)
-						{
-							v_jump_empty = l_int32_const(lc, jsestate->jump_empty);
-							LLVMAddCase(v_switch, v_jump_empty, b_empty);
-						}
-						/* ON EMPTY code */
-						LLVMPositionBuilderAtEnd(b, b_empty);
-						if (jsestate->jump_empty >= 0)
-							LLVMBuildBr(b, opblocks[jsestate->jump_empty]);
-						else
-							LLVMBuildUnreachable(b);
-
-						/* Returned jsestate->jump_error? */
-						if (jsestate->jump_error >= 0)
-						{
-							v_jump_error = l_int32_const(lc, jsestate->jump_error);
-							LLVMAddCase(v_switch, v_jump_error, b_error);
-						}
-						/* ON ERROR code */
-						LLVMPositionBuilderAtEnd(b, b_error);
-						if (jsestate->jump_error >= 0)
-							LLVMBuildBr(b, opblocks[jsestate->jump_error]);
-						else
-							LLVMBuildUnreachable(b);
-
-						/* Returned jsestate->jump_eval_coercion? */
-						if (jsestate->jump_eval_coercion >= 0)
-						{
-							v_jump_coercion = l_int32_const(lc, jsestate->jump_eval_coercion);
-							LLVMAddCase(v_switch, v_jump_coercion, b_coercion);
-						}
-						/* jump_eval_coercion code */
-						LLVMPositionBuilderAtEnd(b, b_coercion);
-						if (jsestate->jump_eval_coercion >= 0)
-							LLVMBuildBr(b, opblocks[jsestate->jump_eval_coercion]);
-						else
-							LLVMBuildUnreachable(b);
-
-						LLVMPositionBuilderAtEnd(b, b_done);
-					}
-
-					LLVMBuildBr(b, opblocks[jsestate->jump_end]);
-					break;
-				}
-
-			case EEOP_JSONEXPR_COERCION:
-				build_EvalXFunc(b, mod, "ExecEvalJsonCoercion",
-								v_state, op, v_econtext);
-
-				LLVMBuildBr(b, opblocks[opno + 1]);
-				break;
-
-			case EEOP_JSONEXPR_COERCION_FINISH:
-				build_EvalXFunc(b, mod, "ExecEvalJsonCoercionFinish",
-								v_state, op);
-
-				LLVMBuildBr(b, opblocks[opno + 1]);
-				break;
-
 			case EEOP_AGGREF:
 				{
 					LLVMValueRef v_aggno;
@@ -2093,12 +1973,6 @@ llvm_compile_expr(ExprState *state)
 					LLVMBuildBr(b, opblocks[opno + 1]);
 					break;
 				}
-
-			case EEOP_MERGE_SUPPORT_FUNC:
-				build_EvalXFunc(b, mod, "ExecEvalMergeSupportFunc",
-								v_state, op, v_econtext);
-				LLVMBuildBr(b, opblocks[opno + 1]);
-				break;
 
 			case EEOP_SUBPLAN:
 				build_EvalXFunc(b, mod, "ExecEvalSubPlan",
@@ -2764,8 +2638,12 @@ create_LifetimeEnd(LLVMModuleRef mod)
 	LLVMTypeRef param_types[2];
 	LLVMContextRef lc;
 
-	/* variadic pointer argument */
+	/* LLVM 5+ has a variadic pointer argument */
+#if LLVM_VERSION_MAJOR < 5
+	const char *nm = "llvm.lifetime.end";
+#else
 	const char *nm = "llvm.lifetime.end.p0i8";
+#endif
 
 	fn = LLVMGetNamedFunction(mod, nm);
 	if (fn)

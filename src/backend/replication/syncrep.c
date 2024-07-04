@@ -63,7 +63,7 @@
  * the standbys which are considered as synchronous at that moment
  * will release waiters from the queue.
  *
- * Portions Copyright (c) 2010-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2010-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/replication/syncrep.c
@@ -75,14 +75,15 @@
 #include <unistd.h>
 
 #include "access/xact.h"
-#include "common/int.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "replication/syncrep.h"
 #include "replication/walsender.h"
 #include "replication/walsender_private.h"
+#include "storage/pmsignal.h"
 #include "storage/proc.h"
 #include "tcop/tcopprot.h"
+#include "utils/builtins.h"
 #include "utils/guc_hooks.h"
 #include "utils/ps_status.h"
 
@@ -415,7 +416,7 @@ SyncRepInitConfig(void)
 		SpinLockRelease(&MyWalSnd->mutex);
 
 		ereport(DEBUG1,
-				(errmsg_internal("standby \"%s\" now has synchronous standby priority %d",
+				(errmsg_internal("standby \"%s\" now has synchronous standby priority %u",
 								 application_name, priority)));
 	}
 }
@@ -482,7 +483,7 @@ SyncRepReleaseWaiters(void)
 
 		if (SyncRepConfig->syncrep_method == SYNC_REP_PRIORITY)
 			ereport(LOG,
-					(errmsg("standby \"%s\" is now a synchronous standby with priority %d",
+					(errmsg("standby \"%s\" is now a synchronous standby with priority %u",
 							application_name, MyWalSnd->sync_standby_priority)));
 		else
 			ereport(LOG,
@@ -697,7 +698,12 @@ cmp_lsn(const void *a, const void *b)
 	XLogRecPtr	lsn1 = *((const XLogRecPtr *) a);
 	XLogRecPtr	lsn2 = *((const XLogRecPtr *) b);
 
-	return pg_cmp_u64(lsn2, lsn1);
+	if (lsn1 > lsn2)
+		return -1;
+	else if (lsn1 == lsn2)
+		return 0;
+	else
+		return 1;
 }
 
 /*
@@ -1010,7 +1016,7 @@ check_synchronous_standby_names(char **newval, void **extra, GucSource source)
 			if (syncrep_parse_error_msg)
 				GUC_check_errdetail("%s", syncrep_parse_error_msg);
 			else
-				GUC_check_errdetail("\"synchronous_standby_names\" parser failed");
+				GUC_check_errdetail("synchronous_standby_names parser failed");
 			return false;
 		}
 

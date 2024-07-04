@@ -45,7 +45,7 @@
  * and we'd like to still refer to them via C struct offsets.
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -61,6 +61,7 @@
 #include "access/sysattr.h"
 #include "access/tupdesc_details.h"
 #include "common/hashfn.h"
+#include "executor/tuptable.h"
 #include "utils/datum.h"
 #include "utils/expandeddatum.h"
 #include "utils/hsearch.h"
@@ -84,7 +85,7 @@
 	((att)->attstorage != TYPSTORAGE_PLAIN)
 
 /*
- * Setup for caching pass-by-ref missing attributes in a way that survives
+ * Setup for cacheing pass-by-ref missing attributes in a way that survives
  * tupleDesc destruction.
  */
 
@@ -213,8 +214,8 @@ getmissingattr(TupleDesc tupleDesc,
  */
 Size
 heap_compute_data_size(TupleDesc tupleDesc,
-					   const Datum *values,
-					   const bool *isnull)
+					   Datum *values,
+					   bool *isnull)
 {
 	Size		data_length = 0;
 	int			i;
@@ -398,7 +399,7 @@ fill_val(Form_pg_attribute att,
  */
 void
 heap_fill_tuple(TupleDesc tupleDesc,
-				const Datum *values, const bool *isnull,
+				Datum *values, bool *isnull,
 				char *data, Size data_size,
 				uint16 *infomask, bits8 *bit)
 {
@@ -495,8 +496,8 @@ heap_attisnull(HeapTuple tup, int attnum, TupleDesc tupleDesc)
 /* ----------------
  *		nocachegetattr
  *
- *		This only gets called from fastgetattr(), in cases where we
- *		can't use a cacheoffset and the value is not null.
+ *		This only gets called from fastgetattr() macro, in cases where
+ *		we can't use a cacheoffset and the value is not null.
  *
  *		This caches attribute offsets in the attribute descriptor.
  *
@@ -715,8 +716,8 @@ nocachegetattr(HeapTuple tup,
  *
  *		Fetch the value of a system attribute for a tuple.
  *
- * This is a support routine for heap_getattr().  The function has already
- * determined that the attnum refers to a system attribute.
+ * This is a support routine for the heap_getattr macro.  The macro
+ * has already determined that the attnum refers to a system attribute.
  * ----------------
  */
 Datum
@@ -1114,8 +1115,8 @@ heap_copy_tuple_as_datum(HeapTuple tuple, TupleDesc tupleDesc)
  */
 HeapTuple
 heap_form_tuple(TupleDesc tupleDescriptor,
-				const Datum *values,
-				const bool *isnull)
+				Datum *values,
+				bool *isnull)
 {
 	HeapTuple	tuple;			/* return tuple */
 	HeapTupleHeader td;			/* tuple data */
@@ -1208,9 +1209,9 @@ heap_form_tuple(TupleDesc tupleDescriptor,
 HeapTuple
 heap_modify_tuple(HeapTuple tuple,
 				  TupleDesc tupleDesc,
-				  const Datum *replValues,
-				  const bool *replIsnull,
-				  const bool *doReplace)
+				  Datum *replValues,
+				  bool *replIsnull,
+				  bool *doReplace)
 {
 	int			numberOfAttributes = tupleDesc->natts;
 	int			attoff;
@@ -1277,9 +1278,9 @@ HeapTuple
 heap_modify_tuple_by_cols(HeapTuple tuple,
 						  TupleDesc tupleDesc,
 						  int nCols,
-						  const int *replCols,
-						  const Datum *replValues,
-						  const bool *replIsnull)
+						  int *replCols,
+						  Datum *replValues,
+						  bool *replIsnull)
 {
 	int			numberOfAttributes = tupleDesc->natts;
 	Datum	   *values;
@@ -1450,8 +1451,8 @@ heap_freetuple(HeapTuple htup)
  */
 MinimalTuple
 heap_form_minimal_tuple(TupleDesc tupleDescriptor,
-						const Datum *values,
-						const bool *isnull)
+						Datum *values,
+						bool *isnull)
 {
 	MinimalTuple tuple;			/* return tuple */
 	Size		len,

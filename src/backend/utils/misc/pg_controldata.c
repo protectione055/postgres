@@ -5,7 +5,7 @@
  * Routines to expose the contents of the control data file via
  * a set of SQL functions.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -20,6 +20,7 @@
 #include "access/xlog.h"
 #include "access/xlog_internal.h"
 #include "catalog/pg_control.h"
+#include "catalog/pg_type.h"
 #include "common/controldata_utils.h"
 #include "funcapi.h"
 #include "miscadmin.h"

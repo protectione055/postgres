@@ -23,7 +23,7 @@ install-pgtypeslib-recurse install-ecpglib-recurse install-compatlib-recurse ins
 install-compatlib-recurse: install-ecpglib-recurse
 install-ecpglib-recurse: install-pgtypeslib-recurse
 
-clean distclean:
+clean distclean maintainer-clean:
 	$(MAKE) -C test clean
 
 checktcp: | temp-install

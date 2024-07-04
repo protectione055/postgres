@@ -1,9 +1,9 @@
 
-# Copyright (c) 2021-2024, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 # Test behavior with different schema on subscriber
 use strict;
-use warnings FATAL => 'all';
+use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
@@ -15,7 +15,7 @@ $node_publisher->start;
 
 # Create subscriber node
 my $node_subscriber = PostgreSQL::Test::Cluster->new('subscriber');
-$node_subscriber->init;
+$node_subscriber->init(allows_streaming => 'logical');
 $node_subscriber->start;
 
 # Create some preexisting content on publisher
@@ -48,8 +48,7 @@ is($result, qq(2|2|2), 'check initial data was copied to subscriber');
 
 # Update the rows on the publisher and check the additional columns on
 # subscriber didn't change
-$node_publisher->safe_psql('postgres',
-	"UPDATE test_tab SET b = encode(sha256(b::bytea), 'hex')");
+$node_publisher->safe_psql('postgres', "UPDATE test_tab SET b = md5(b)");
 
 $node_publisher->wait_for_catchup('tap_sub');
 
@@ -66,7 +65,7 @@ $node_subscriber->safe_psql('postgres',
 	"UPDATE test_tab SET c = 'epoch'::timestamptz + 987654321 * interval '1s'"
 );
 $node_publisher->safe_psql('postgres',
-	"UPDATE test_tab SET b = encode(sha256(a::text::bytea), 'hex')");
+	"UPDATE test_tab SET b = md5(a::text)");
 
 $node_publisher->wait_for_catchup('tap_sub');
 

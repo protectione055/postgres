@@ -3,7 +3,7 @@
  * pl_handler.c		- Handler for the PL/pgSQL
  *			  procedural language
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -47,8 +47,8 @@ bool		plpgsql_print_strict_params = false;
 
 bool		plpgsql_check_asserts = true;
 
-static char *plpgsql_extra_warnings_string = NULL;
-static char *plpgsql_extra_errors_string = NULL;
+char	   *plpgsql_extra_warnings_string = NULL;
+char	   *plpgsql_extra_errors_string = NULL;
 int			plpgsql_extra_warnings;
 int			plpgsql_extra_errors;
 
@@ -288,7 +288,7 @@ plpgsql_call_handler(PG_FUNCTION_ARGS)
 		/* Be sure to release the procedure resowner if any */
 		if (procedure_resowner)
 		{
-			ReleaseAllPlanCacheRefsInOwner(procedure_resowner);
+			ResourceOwnerReleaseAllPlanCacheRefs(procedure_resowner);
 			ResourceOwnerDelete(procedure_resowner);
 		}
 	}
@@ -393,7 +393,7 @@ plpgsql_inline_handler(PG_FUNCTION_ARGS)
 
 		/* Clean up the private EState and resowner */
 		FreeExecutorState(simple_eval_estate);
-		ReleaseAllPlanCacheRefsInOwner(simple_eval_resowner);
+		ResourceOwnerReleaseAllPlanCacheRefs(simple_eval_resowner);
 		ResourceOwnerDelete(simple_eval_resowner);
 
 		/* Function should now have no remaining use-counts ... */
@@ -410,7 +410,7 @@ plpgsql_inline_handler(PG_FUNCTION_ARGS)
 
 	/* Clean up the private EState and resowner */
 	FreeExecutorState(simple_eval_estate);
-	ReleaseAllPlanCacheRefsInOwner(simple_eval_resowner);
+	ResourceOwnerReleaseAllPlanCacheRefs(simple_eval_resowner);
 	ResourceOwnerDelete(simple_eval_resowner);
 
 	/* Function should now have no remaining use-counts ... */

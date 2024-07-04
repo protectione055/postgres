@@ -4,7 +4,7 @@
  *	  postgres transaction access method support code
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/transam.h
@@ -197,7 +197,7 @@ FullTransactionIdAdvance(FullTransactionId *dest)
 #define FirstNormalObjectId		16384
 
 /*
- * TransamVariables is a data structure in shared memory that is used to track
+ * VariableCache is a data structure in shared memory that is used to track
  * OID and XID assignment state.  For largely historical reasons, there is
  * just one struct with different fields that are protected by different
  * LWLocks.
@@ -206,7 +206,7 @@ FullTransactionIdAdvance(FullTransactionId *dest)
  * used just to generate useful messages when xidWarnLimit or xidStopLimit
  * are exceeded.
  */
-typedef struct TransamVariablesData
+typedef struct VariableCacheData
 {
 	/*
 	 * These fields are protected by OidGenLock.
@@ -252,7 +252,9 @@ typedef struct TransamVariablesData
 	 */
 	TransactionId oldestClogXid;	/* oldest it's safe to look up in clog */
 
-} TransamVariablesData;
+} VariableCacheData;
+
+typedef VariableCacheData *VariableCache;
 
 
 /* ----------------
@@ -264,7 +266,7 @@ typedef struct TransamVariablesData
 extern bool TransactionStartedDuringRecovery(void);
 
 /* in transam/varsup.c */
-extern PGDLLIMPORT TransamVariablesData *TransamVariables;
+extern PGDLLIMPORT VariableCache ShmemVariableCache;
 
 /*
  * prototypes for functions in transam/transam.c
@@ -283,8 +285,6 @@ extern TransactionId TransactionIdLatest(TransactionId mainxid,
 extern XLogRecPtr TransactionIdGetCommitLSN(TransactionId xid);
 
 /* in transam/varsup.c */
-extern Size VarsupShmemSize(void);
-extern void VarsupShmemInit(void);
 extern FullTransactionId GetNewTransactionId(bool isSubXact);
 extern void AdvanceNextFullTransactionIdPastXid(TransactionId xid);
 extern FullTransactionId ReadNextFullTransactionId(void);

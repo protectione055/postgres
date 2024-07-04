@@ -3,7 +3,7 @@
  * pg_recvlogical.c - receive data from a logical decoding slot in a streaming
  *					  fashion and write it to a local file.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/pg_recvlogical.c
@@ -32,14 +32,6 @@
 /* Time to sleep between reconnection attempts */
 #define RECONNECT_SLEEP_TIME 5
 
-typedef enum
-{
-	STREAM_STOP_NONE,
-	STREAM_STOP_END_OF_WAL,
-	STREAM_STOP_KEEPALIVE,
-	STREAM_STOP_SIGNAL
-} StreamStopReason;
-
 /* Global Options */
 static char *outfile = NULL;
 static int	verbose = 0;
@@ -63,7 +55,6 @@ static const char *plugin = "test_decoding";
 /* Global State */
 static int	outfd = -1;
 static volatile sig_atomic_t time_to_abort = false;
-static volatile sig_atomic_t stop_reason = STREAM_STOP_NONE;
 static volatile sig_atomic_t output_reopen = false;
 static bool output_isfile;
 static TimestampTz output_last_fsync = -1;
@@ -75,8 +66,7 @@ static void usage(void);
 static void StreamLogicalLog(void);
 static bool flushAndSendFeedback(PGconn *conn, TimestampTz *now);
 static void prepareToTerminate(PGconn *conn, XLogRecPtr endpos,
-							   StreamStopReason reason,
-							   XLogRecPtr lsn);
+							   bool keepalive, XLogRecPtr lsn);
 
 static void
 usage(void)
@@ -217,11 +207,9 @@ StreamLogicalLog(void)
 	TimestampTz last_status = -1;
 	int			i;
 	PQExpBuffer query;
-	XLogRecPtr	cur_record_lsn;
 
 	output_written_lsn = InvalidXLogRecPtr;
 	output_fsync_lsn = InvalidXLogRecPtr;
-	cur_record_lsn = InvalidXLogRecPtr;
 
 	/*
 	 * Connect in replication mode to the server
@@ -287,8 +275,7 @@ StreamLogicalLog(void)
 		int			bytes_written;
 		TimestampTz now;
 		int			hdr_len;
-
-		cur_record_lsn = InvalidXLogRecPtr;
+		XLogRecPtr	cur_record_lsn = InvalidXLogRecPtr;
 
 		if (copybuf != NULL)
 		{
@@ -500,7 +487,7 @@ StreamLogicalLog(void)
 
 			if (endposReached)
 			{
-				stop_reason = STREAM_STOP_KEEPALIVE;
+				prepareToTerminate(conn, endpos, true, InvalidXLogRecPtr);
 				time_to_abort = true;
 				break;
 			}
@@ -540,7 +527,7 @@ StreamLogicalLog(void)
 			 */
 			if (!flushAndSendFeedback(conn, &now))
 				goto error;
-			stop_reason = STREAM_STOP_END_OF_WAL;
+			prepareToTerminate(conn, endpos, false, cur_record_lsn);
 			time_to_abort = true;
 			break;
 		}
@@ -585,15 +572,11 @@ StreamLogicalLog(void)
 			/* endpos was exactly the record we just processed, we're done */
 			if (!flushAndSendFeedback(conn, &now))
 				goto error;
-			stop_reason = STREAM_STOP_END_OF_WAL;
+			prepareToTerminate(conn, endpos, false, cur_record_lsn);
 			time_to_abort = true;
 			break;
 		}
 	}
-
-	/* Clean up connection state if stream has been aborted */
-	if (time_to_abort)
-		prepareToTerminate(conn, endpos, stop_reason, cur_record_lsn);
 
 	res = PQgetResult(conn);
 	if (PQresultStatus(res) == PGRES_COPY_OUT)
@@ -673,7 +656,6 @@ error:
 static void
 sigexit_handler(SIGNAL_ARGS)
 {
-	stop_reason = STREAM_STOP_SIGNAL;
 	time_to_abort = true;
 }
 
@@ -1039,31 +1021,18 @@ flushAndSendFeedback(PGconn *conn, TimestampTz *now)
  * retry on failure.
  */
 static void
-prepareToTerminate(PGconn *conn, XLogRecPtr endpos, StreamStopReason reason,
-				   XLogRecPtr lsn)
+prepareToTerminate(PGconn *conn, XLogRecPtr endpos, bool keepalive, XLogRecPtr lsn)
 {
 	(void) PQputCopyEnd(conn, NULL);
 	(void) PQflush(conn);
 
 	if (verbose)
 	{
-		switch (reason)
-		{
-			case STREAM_STOP_SIGNAL:
-				pg_log_info("received interrupt signal, exiting");
-				break;
-			case STREAM_STOP_KEEPALIVE:
-				pg_log_info("end position %X/%X reached by keepalive",
-							LSN_FORMAT_ARGS(endpos));
-				break;
-			case STREAM_STOP_END_OF_WAL:
-				Assert(!XLogRecPtrIsInvalid(lsn));
-				pg_log_info("end position %X/%X reached by WAL record at %X/%X",
-							LSN_FORMAT_ARGS(endpos), LSN_FORMAT_ARGS(lsn));
-				break;
-			case STREAM_STOP_NONE:
-				Assert(false);
-				break;
-		}
+		if (keepalive)
+			pg_log_info("end position %X/%X reached by keepalive",
+						LSN_FORMAT_ARGS(endpos));
+		else
+			pg_log_info("end position %X/%X reached by WAL record at %X/%X",
+						LSN_FORMAT_ARGS(endpos), LSN_FORMAT_ARGS(lsn));
 	}
 }

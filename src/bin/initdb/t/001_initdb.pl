@@ -1,12 +1,12 @@
 
-# Copyright (c) 2021-2024, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 # To test successful data directory creation with an additional feature, first
 # try to elaborate the "successful creation" test instead of adding a test.
 # Successful initdb consumes much time and I/O.
 
 use strict;
-use warnings FATAL => 'all';
+use warnings;
 use Fcntl ':mode';
 use File::stat qw{lstat};
 use PostgreSQL::Test::Cluster;
@@ -16,7 +16,6 @@ use Test::More;
 my $tempdir = PostgreSQL::Test::Utils::tempdir;
 my $xlogdir = "$tempdir/pgxlog";
 my $datadir = "$tempdir/data";
-my $supports_syncfs = check_pg_config("#define HAVE_SYNCFS 1");
 
 program_help_ok('initdb');
 program_version_ok('initdb');
@@ -83,22 +82,11 @@ command_fails([ 'pg_checksums', '-D', $datadir ],
 command_ok([ 'initdb', '-S', $datadir ], 'sync only');
 command_fails([ 'initdb', $datadir ], 'existing data directory');
 
-if ($supports_syncfs)
-{
-	command_ok([ 'initdb', '-S', $datadir, '--sync-method', 'syncfs' ],
-		'sync method syncfs');
-}
-else
-{
-	command_fails([ 'initdb', '-S', $datadir, '--sync-method', 'syncfs' ],
-		'sync method syncfs');
-}
-
 # Check group access on PGDATA
 SKIP:
 {
 	skip "unix-style permissions not supported on Windows", 2
-	  if ($windows_os || $Config::Config{osname} eq 'cygwin');
+	  if ($windows_os);
 
 	# Init a new db with group access
 	my $datadir_group = "$tempdir/data_group";
@@ -117,7 +105,7 @@ if ($ENV{with_icu} eq 'yes')
 {
 	command_fails_like(
 		[ 'initdb', '--no-sync', '--locale-provider=icu', "$tempdir/data2" ],
-		qr/initdb: error: locale must be specified if provider is icu/,
+		qr/initdb: error: ICU locale must be specified/,
 		'locale provider ICU requires --icu-locale');
 
 	command_ok(
@@ -138,7 +126,7 @@ if ($ENV{with_icu} eq 'yes')
 			'--lc-monetary=C', '--lc-time=C',
 			"$tempdir/data4"
 		],
-		qr/^\s+default collation:\s+und\n/ms,
+		qr/^\s+ICU locale:\s+und\n/ms,
 		'options --locale-provider=icu --locale=und --lc-*=C');
 
 	command_fails_like(
@@ -183,61 +171,6 @@ else
 		[ 'initdb', '--no-sync', '--locale-provider=icu', "$tempdir/data2" ],
 		'locale provider ICU fails since no ICU support');
 }
-
-command_fails(
-	[ 'initdb', '--no-sync', '--locale-provider=builtin', "$tempdir/data6" ],
-	'locale provider builtin fails without --locale');
-
-command_ok(
-	[
-		'initdb', '--no-sync',
-		'--locale-provider=builtin', '--locale=C',
-		"$tempdir/data7"
-	],
-	'locale provider builtin with --locale');
-
-command_ok(
-	[
-		'initdb', '--no-sync',
-		'--locale-provider=builtin', '-E UTF-8',
-		'--lc-collate=C', '--lc-ctype=C',
-		'--builtin-locale=C.UTF-8', "$tempdir/data8"
-	],
-	'locale provider builtin with -E UTF-8 --builtin-locale=C.UTF-8');
-
-command_fails(
-	[
-		'initdb', '--no-sync',
-		'--locale-provider=builtin', '-E SQL_ASCII',
-		'--lc-collate=C', '--lc-ctype=C',
-		'--builtin-locale=C.UTF-8', "$tempdir/data9"
-	],
-	'locale provider builtin with --builtin-locale=C.UTF-8 fails for SQL_ASCII'
-);
-
-command_ok(
-	[
-		'initdb', '--no-sync',
-		'--locale-provider=builtin', '--lc-ctype=C',
-		'--locale=C', "$tempdir/data10"
-	],
-	'locale provider builtin with --lc-ctype');
-
-command_fails(
-	[
-		'initdb', '--no-sync',
-		'--locale-provider=builtin', '--icu-locale=en',
-		"$tempdir/dataX"
-	],
-	'fails for locale provider builtin with ICU locale');
-
-command_fails(
-	[
-		'initdb', '--no-sync',
-		'--locale-provider=builtin', '--icu-rules=""',
-		"$tempdir/dataX"
-	],
-	'fails for locale provider builtin with ICU rules');
 
 command_fails(
 	[ 'initdb', '--no-sync', '--locale-provider=xyz', "$tempdir/dataX" ],

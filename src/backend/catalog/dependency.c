@@ -4,7 +4,7 @@
  *	  Routines to support inter-object dependencies.
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -81,7 +81,9 @@
 #include "parser/parsetree.h"
 #include "rewrite/rewriteRemove.h"
 #include "storage/lmgr.h"
+#include "utils/acl.h"
 #include "utils/fmgroids.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 
@@ -142,6 +144,60 @@ typedef struct
 	List	   *rtables;		/* list of rangetables to resolve Vars */
 } find_expr_references_context;
 
+/*
+ * This constant table maps ObjectClasses to the corresponding catalog OIDs.
+ * See also getObjectClass().
+ */
+static const Oid object_classes[] = {
+	RelationRelationId,			/* OCLASS_CLASS */
+	ProcedureRelationId,		/* OCLASS_PROC */
+	TypeRelationId,				/* OCLASS_TYPE */
+	CastRelationId,				/* OCLASS_CAST */
+	CollationRelationId,		/* OCLASS_COLLATION */
+	ConstraintRelationId,		/* OCLASS_CONSTRAINT */
+	ConversionRelationId,		/* OCLASS_CONVERSION */
+	AttrDefaultRelationId,		/* OCLASS_DEFAULT */
+	LanguageRelationId,			/* OCLASS_LANGUAGE */
+	LargeObjectRelationId,		/* OCLASS_LARGEOBJECT */
+	OperatorRelationId,			/* OCLASS_OPERATOR */
+	OperatorClassRelationId,	/* OCLASS_OPCLASS */
+	OperatorFamilyRelationId,	/* OCLASS_OPFAMILY */
+	AccessMethodRelationId,		/* OCLASS_AM */
+	AccessMethodOperatorRelationId, /* OCLASS_AMOP */
+	AccessMethodProcedureRelationId,	/* OCLASS_AMPROC */
+	RewriteRelationId,			/* OCLASS_REWRITE */
+	TriggerRelationId,			/* OCLASS_TRIGGER */
+	NamespaceRelationId,		/* OCLASS_SCHEMA */
+	StatisticExtRelationId,		/* OCLASS_STATISTIC_EXT */
+	TSParserRelationId,			/* OCLASS_TSPARSER */
+	TSDictionaryRelationId,		/* OCLASS_TSDICT */
+	TSTemplateRelationId,		/* OCLASS_TSTEMPLATE */
+	TSConfigRelationId,			/* OCLASS_TSCONFIG */
+	AuthIdRelationId,			/* OCLASS_ROLE */
+	AuthMemRelationId,			/* OCLASS_ROLE_MEMBERSHIP */
+	DatabaseRelationId,			/* OCLASS_DATABASE */
+	TableSpaceRelationId,		/* OCLASS_TBLSPACE */
+	ForeignDataWrapperRelationId,	/* OCLASS_FDW */
+	ForeignServerRelationId,	/* OCLASS_FOREIGN_SERVER */
+	UserMappingRelationId,		/* OCLASS_USER_MAPPING */
+	DefaultAclRelationId,		/* OCLASS_DEFACL */
+	ExtensionRelationId,		/* OCLASS_EXTENSION */
+	EventTriggerRelationId,		/* OCLASS_EVENT_TRIGGER */
+	ParameterAclRelationId,		/* OCLASS_PARAMETER_ACL */
+	PolicyRelationId,			/* OCLASS_POLICY */
+	PublicationNamespaceRelationId, /* OCLASS_PUBLICATION_NAMESPACE */
+	PublicationRelationId,		/* OCLASS_PUBLICATION */
+	PublicationRelRelationId,	/* OCLASS_PUBLICATION_REL */
+	SubscriptionRelationId,		/* OCLASS_SUBSCRIPTION */
+	TransformRelationId			/* OCLASS_TRANSFORM */
+};
+
+/*
+ * Make sure object_classes is kept up to date with the ObjectClass enum.
+ */
+StaticAssertDecl(lengthof(object_classes) == LAST_OCLASS + 1,
+				 "object_classes[] must cover all ObjectClasses");
+
 
 static void findDependentObjects(const ObjectAddress *object,
 								 int objflags,
@@ -163,7 +219,7 @@ static void process_function_rte_ref(RangeTblEntry *rte, AttrNumber attnum,
 									 find_expr_references_context *context);
 static void eliminate_duplicate_dependencies(ObjectAddresses *addrs);
 static int	object_address_comparator(const void *a, const void *b);
-static void add_object_address(Oid classId, Oid objectId, int32 subId,
+static void add_object_address(ObjectClass oclass, Oid objectId, int32 subId,
 							   ObjectAddresses *addrs);
 static void add_exact_object_address_extra(const ObjectAddress *object,
 										   const ObjectAddressExtra *extra,
@@ -206,7 +262,7 @@ deleteObjectsInList(ObjectAddresses *targetObjects, Relation *depRel,
 			if (extra->flags & DEPFLAG_REVERSE)
 				normal = true;
 
-			if (EventTriggerSupportsObject(thisobj))
+			if (EventTriggerSupportsObjectClass(getObjectClass(thisobj)))
 			{
 				EventTriggerSQLDropAddObject(thisobj, original, normal);
 			}
@@ -1326,9 +1382,7 @@ deleteOneObject(const ObjectAddress *object, Relation *depRel, int flags)
 	/*
 	 * Delete any comments, security labels, or initial privileges associated
 	 * with this object.  (This is a convenient place to do these things,
-	 * rather than having every object type know to do it.)  As above, all
-	 * these functions must remove records for sub-objects too if the subid is
-	 * zero.
+	 * rather than having every object type know to do it.)
 	 */
 	DeleteComments(object->objectId, object->classId, object->objectSubId);
 	DeleteSecurityLabel(object);
@@ -1351,9 +1405,9 @@ deleteOneObject(const ObjectAddress *object, Relation *depRel, int flags)
 static void
 doDeletion(const ObjectAddress *object, int flags)
 {
-	switch (object->classId)
+	switch (getObjectClass(object))
 	{
-		case RelationRelationId:
+		case OCLASS_CLASS:
 			{
 				char		relKind = get_rel_relkind(object->objectId);
 
@@ -1384,102 +1438,104 @@ doDeletion(const ObjectAddress *object, int flags)
 				break;
 			}
 
-		case ProcedureRelationId:
+		case OCLASS_PROC:
 			RemoveFunctionById(object->objectId);
 			break;
 
-		case TypeRelationId:
+		case OCLASS_TYPE:
 			RemoveTypeById(object->objectId);
 			break;
 
-		case ConstraintRelationId:
+		case OCLASS_CONSTRAINT:
 			RemoveConstraintById(object->objectId);
 			break;
 
-		case AttrDefaultRelationId:
+		case OCLASS_DEFAULT:
 			RemoveAttrDefaultById(object->objectId);
 			break;
 
-		case LargeObjectRelationId:
+		case OCLASS_LARGEOBJECT:
 			LargeObjectDrop(object->objectId);
 			break;
 
-		case OperatorRelationId:
+		case OCLASS_OPERATOR:
 			RemoveOperatorById(object->objectId);
 			break;
 
-		case RewriteRelationId:
+		case OCLASS_REWRITE:
 			RemoveRewriteRuleById(object->objectId);
 			break;
 
-		case TriggerRelationId:
+		case OCLASS_TRIGGER:
 			RemoveTriggerById(object->objectId);
 			break;
 
-		case StatisticExtRelationId:
+		case OCLASS_STATISTIC_EXT:
 			RemoveStatisticsById(object->objectId);
 			break;
 
-		case TSConfigRelationId:
+		case OCLASS_TSCONFIG:
 			RemoveTSConfigurationById(object->objectId);
 			break;
 
-		case ExtensionRelationId:
+		case OCLASS_EXTENSION:
 			RemoveExtensionById(object->objectId);
 			break;
 
-		case PolicyRelationId:
+		case OCLASS_POLICY:
 			RemovePolicyById(object->objectId);
 			break;
 
-		case PublicationNamespaceRelationId:
+		case OCLASS_PUBLICATION_NAMESPACE:
 			RemovePublicationSchemaById(object->objectId);
 			break;
 
-		case PublicationRelRelationId:
+		case OCLASS_PUBLICATION_REL:
 			RemovePublicationRelById(object->objectId);
 			break;
 
-		case PublicationRelationId:
+		case OCLASS_PUBLICATION:
 			RemovePublicationById(object->objectId);
 			break;
 
-		case CastRelationId:
-		case CollationRelationId:
-		case ConversionRelationId:
-		case LanguageRelationId:
-		case OperatorClassRelationId:
-		case OperatorFamilyRelationId:
-		case AccessMethodRelationId:
-		case AccessMethodOperatorRelationId:
-		case AccessMethodProcedureRelationId:
-		case NamespaceRelationId:
-		case TSParserRelationId:
-		case TSDictionaryRelationId:
-		case TSTemplateRelationId:
-		case ForeignDataWrapperRelationId:
-		case ForeignServerRelationId:
-		case UserMappingRelationId:
-		case DefaultAclRelationId:
-		case EventTriggerRelationId:
-		case TransformRelationId:
-		case AuthMemRelationId:
+		case OCLASS_CAST:
+		case OCLASS_COLLATION:
+		case OCLASS_CONVERSION:
+		case OCLASS_LANGUAGE:
+		case OCLASS_OPCLASS:
+		case OCLASS_OPFAMILY:
+		case OCLASS_AM:
+		case OCLASS_AMOP:
+		case OCLASS_AMPROC:
+		case OCLASS_SCHEMA:
+		case OCLASS_TSPARSER:
+		case OCLASS_TSDICT:
+		case OCLASS_TSTEMPLATE:
+		case OCLASS_FDW:
+		case OCLASS_FOREIGN_SERVER:
+		case OCLASS_USER_MAPPING:
+		case OCLASS_DEFACL:
+		case OCLASS_EVENT_TRIGGER:
+		case OCLASS_TRANSFORM:
+		case OCLASS_ROLE_MEMBERSHIP:
 			DropObjectById(object);
 			break;
 
 			/*
 			 * These global object types are not supported here.
 			 */
-		case AuthIdRelationId:
-		case DatabaseRelationId:
-		case TableSpaceRelationId:
-		case SubscriptionRelationId:
-		case ParameterAclRelationId:
+		case OCLASS_ROLE:
+		case OCLASS_DATABASE:
+		case OCLASS_TBLSPACE:
+		case OCLASS_SUBSCRIPTION:
+		case OCLASS_PARAMETER_ACL:
 			elog(ERROR, "global objects cannot be deleted by doDeletion");
 			break;
 
-		default:
-			elog(ERROR, "unsupported object class: %u", object->classId);
+			/*
+			 * There's intentionally no default: case here; we want the
+			 * compiler to warn if a new OCLASS hasn't been handled above.
+			 */
 	}
 }
 
@@ -1730,7 +1786,7 @@ find_expr_references_walker(Node *node,
 		if (rte->rtekind == RTE_RELATION)
 		{
 			/* If it's a plain relation, reference this column */
-			add_object_address(RelationRelationId, rte->relid, var->varattno,
+			add_object_address(OCLASS_CLASS, rte->relid, var->varattno,
 							   context->addrs);
 		}
 		else if (rte->rtekind == RTE_FUNCTION)
@@ -1756,7 +1812,7 @@ find_expr_references_walker(Node *node,
 		Oid			objoid;
 
 		/* A constant must depend on the constant's datatype */
-		add_object_address(TypeRelationId, con->consttype, 0,
+		add_object_address(OCLASS_TYPE, con->consttype, 0,
 						   context->addrs);
 
 		/*
@@ -1767,7 +1823,7 @@ find_expr_references_walker(Node *node,
 		 */
 		if (OidIsValid(con->constcollid) &&
 			con->constcollid != DEFAULT_COLLATION_OID)
-			add_object_address(CollationRelationId, con->constcollid, 0,
+			add_object_address(OCLASS_COLLATION, con->constcollid, 0,
 							   context->addrs);
 
 		/*
@@ -1785,7 +1841,7 @@ find_expr_references_walker(Node *node,
 					objoid = DatumGetObjectId(con->constvalue);
 					if (SearchSysCacheExists1(PROCOID,
 											  ObjectIdGetDatum(objoid)))
-						add_object_address(ProcedureRelationId, objoid, 0,
+						add_object_address(OCLASS_PROC, objoid, 0,
 										   context->addrs);
 					break;
 				case REGOPEROID:
@@ -1793,42 +1849,42 @@ find_expr_references_walker(Node *node,
 					objoid = DatumGetObjectId(con->constvalue);
 					if (SearchSysCacheExists1(OPEROID,
 											  ObjectIdGetDatum(objoid)))
-						add_object_address(OperatorRelationId, objoid, 0,
+						add_object_address(OCLASS_OPERATOR, objoid, 0,
 										   context->addrs);
 					break;
 				case REGCLASSOID:
 					objoid = DatumGetObjectId(con->constvalue);
 					if (SearchSysCacheExists1(RELOID,
 											  ObjectIdGetDatum(objoid)))
-						add_object_address(RelationRelationId, objoid, 0,
+						add_object_address(OCLASS_CLASS, objoid, 0,
 										   context->addrs);
 					break;
 				case REGTYPEOID:
 					objoid = DatumGetObjectId(con->constvalue);
 					if (SearchSysCacheExists1(TYPEOID,
 											  ObjectIdGetDatum(objoid)))
-						add_object_address(TypeRelationId, objoid, 0,
+						add_object_address(OCLASS_TYPE, objoid, 0,
 										   context->addrs);
 					break;
 				case REGCOLLATIONOID:
 					objoid = DatumGetObjectId(con->constvalue);
 					if (SearchSysCacheExists1(COLLOID,
 											  ObjectIdGetDatum(objoid)))
-						add_object_address(CollationRelationId, objoid, 0,
+						add_object_address(OCLASS_COLLATION, objoid, 0,
 										   context->addrs);
 					break;
 				case REGCONFIGOID:
 					objoid = DatumGetObjectId(con->constvalue);
 					if (SearchSysCacheExists1(TSCONFIGOID,
 											  ObjectIdGetDatum(objoid)))
-						add_object_address(TSConfigRelationId, objoid, 0,
+						add_object_address(OCLASS_TSCONFIG, objoid, 0,
 										   context->addrs);
 					break;
 				case REGDICTIONARYOID:
 					objoid = DatumGetObjectId(con->constvalue);
 					if (SearchSysCacheExists1(TSDICTOID,
 											  ObjectIdGetDatum(objoid)))
-						add_object_address(TSDictionaryRelationId, objoid, 0,
+						add_object_address(OCLASS_TSDICT, objoid, 0,
 										   context->addrs);
 					break;
 
@@ -1836,7 +1892,7 @@ find_expr_references_walker(Node *node,
 					objoid = DatumGetObjectId(con->constvalue);
 					if (SearchSysCacheExists1(NAMESPACEOID,
 											  ObjectIdGetDatum(objoid)))
-						add_object_address(NamespaceRelationId, objoid, 0,
+						add_object_address(OCLASS_SCHEMA, objoid, 0,
 										   context->addrs);
 					break;
 
@@ -1859,19 +1915,19 @@ find_expr_references_walker(Node *node,
 		Param	   *param = (Param *) node;
 
 		/* A parameter must depend on the parameter's datatype */
-		add_object_address(TypeRelationId, param->paramtype, 0,
+		add_object_address(OCLASS_TYPE, param->paramtype, 0,
 						   context->addrs);
 		/* and its collation, just as for Consts */
 		if (OidIsValid(param->paramcollid) &&
 			param->paramcollid != DEFAULT_COLLATION_OID)
-			add_object_address(CollationRelationId, param->paramcollid, 0,
+			add_object_address(OCLASS_COLLATION, param->paramcollid, 0,
 							   context->addrs);
 	}
 	else if (IsA(node, FuncExpr))
 	{
 		FuncExpr   *funcexpr = (FuncExpr *) node;
 
-		add_object_address(ProcedureRelationId, funcexpr->funcid, 0,
+		add_object_address(OCLASS_PROC, funcexpr->funcid, 0,
 						   context->addrs);
 		/* fall through to examine arguments */
 	}
@@ -1879,7 +1935,7 @@ find_expr_references_walker(Node *node,
 	{
 		OpExpr	   *opexpr = (OpExpr *) node;
 
-		add_object_address(OperatorRelationId, opexpr->opno, 0,
+		add_object_address(OCLASS_OPERATOR, opexpr->opno, 0,
 						   context->addrs);
 		/* fall through to examine arguments */
 	}
@@ -1887,7 +1943,7 @@ find_expr_references_walker(Node *node,
 	{
 		DistinctExpr *distinctexpr = (DistinctExpr *) node;
 
-		add_object_address(OperatorRelationId, distinctexpr->opno, 0,
+		add_object_address(OCLASS_OPERATOR, distinctexpr->opno, 0,
 						   context->addrs);
 		/* fall through to examine arguments */
 	}
@@ -1895,7 +1951,7 @@ find_expr_references_walker(Node *node,
 	{
 		NullIfExpr *nullifexpr = (NullIfExpr *) node;
 
-		add_object_address(OperatorRelationId, nullifexpr->opno, 0,
+		add_object_address(OCLASS_OPERATOR, nullifexpr->opno, 0,
 						   context->addrs);
 		/* fall through to examine arguments */
 	}
@@ -1903,7 +1959,7 @@ find_expr_references_walker(Node *node,
 	{
 		ScalarArrayOpExpr *opexpr = (ScalarArrayOpExpr *) node;
 
-		add_object_address(OperatorRelationId, opexpr->opno, 0,
+		add_object_address(OCLASS_OPERATOR, opexpr->opno, 0,
 						   context->addrs);
 		/* fall through to examine arguments */
 	}
@@ -1911,7 +1967,7 @@ find_expr_references_walker(Node *node,
 	{
 		Aggref	   *aggref = (Aggref *) node;
 
-		add_object_address(ProcedureRelationId, aggref->aggfnoid, 0,
+		add_object_address(OCLASS_PROC, aggref->aggfnoid, 0,
 						   context->addrs);
 		/* fall through to examine arguments */
 	}
@@ -1919,7 +1975,7 @@ find_expr_references_walker(Node *node,
 	{
 		WindowFunc *wfunc = (WindowFunc *) node;
 
-		add_object_address(ProcedureRelationId, wfunc->winfnoid, 0,
+		add_object_address(OCLASS_PROC, wfunc->winfnoid, 0,
 						   context->addrs);
 		/* fall through to examine arguments */
 	}
@@ -1935,7 +1991,7 @@ find_expr_references_walker(Node *node,
 		 */
 		if (sbsref->refrestype != sbsref->refcontainertype &&
 			sbsref->refrestype != sbsref->refelemtype)
-			add_object_address(TypeRelationId, sbsref->refrestype, 0,
+			add_object_address(OCLASS_TYPE, sbsref->refrestype, 0,
 							   context->addrs);
 		/* fall through to examine arguments */
 	}
@@ -1960,15 +2016,15 @@ find_expr_references_walker(Node *node,
 		 * anywhere else in the expression.
 		 */
 		if (OidIsValid(reltype))
-			add_object_address(RelationRelationId, reltype, fselect->fieldnum,
+			add_object_address(OCLASS_CLASS, reltype, fselect->fieldnum,
 							   context->addrs);
 		else
-			add_object_address(TypeRelationId, fselect->resulttype, 0,
+			add_object_address(OCLASS_TYPE, fselect->resulttype, 0,
 							   context->addrs);
 		/* the collation might not be referenced anywhere else, either */
 		if (OidIsValid(fselect->resultcollid) &&
 			fselect->resultcollid != DEFAULT_COLLATION_OID)
-			add_object_address(CollationRelationId, fselect->resultcollid, 0,
+			add_object_address(OCLASS_COLLATION, fselect->resultcollid, 0,
 							   context->addrs);
 	}
 	else if (IsA(node, FieldStore))
@@ -1982,11 +2038,11 @@ find_expr_references_walker(Node *node,
 			ListCell   *l;
 
 			foreach(l, fstore->fieldnums)
-				add_object_address(RelationRelationId, reltype, lfirst_int(l),
+				add_object_address(OCLASS_CLASS, reltype, lfirst_int(l),
 								   context->addrs);
 		}
 		else
-			add_object_address(TypeRelationId, fstore->resulttype, 0,
+			add_object_address(OCLASS_TYPE, fstore->resulttype, 0,
 							   context->addrs);
 	}
 	else if (IsA(node, RelabelType))
@@ -1994,12 +2050,12 @@ find_expr_references_walker(Node *node,
 		RelabelType *relab = (RelabelType *) node;
 
 		/* since there is no function dependency, need to depend on type */
-		add_object_address(TypeRelationId, relab->resulttype, 0,
+		add_object_address(OCLASS_TYPE, relab->resulttype, 0,
 						   context->addrs);
 		/* the collation might not be referenced anywhere else, either */
 		if (OidIsValid(relab->resultcollid) &&
 			relab->resultcollid != DEFAULT_COLLATION_OID)
-			add_object_address(CollationRelationId, relab->resultcollid, 0,
+			add_object_address(OCLASS_COLLATION, relab->resultcollid, 0,
 							   context->addrs);
 	}
 	else if (IsA(node, CoerceViaIO))
@@ -2007,12 +2063,12 @@ find_expr_references_walker(Node *node,
 		CoerceViaIO *iocoerce = (CoerceViaIO *) node;
 
 		/* since there is no exposed function, need to depend on type */
-		add_object_address(TypeRelationId, iocoerce->resulttype, 0,
+		add_object_address(OCLASS_TYPE, iocoerce->resulttype, 0,
 						   context->addrs);
 		/* the collation might not be referenced anywhere else, either */
 		if (OidIsValid(iocoerce->resultcollid) &&
 			iocoerce->resultcollid != DEFAULT_COLLATION_OID)
-			add_object_address(CollationRelationId, iocoerce->resultcollid, 0,
+			add_object_address(OCLASS_COLLATION, iocoerce->resultcollid, 0,
 							   context->addrs);
 	}
 	else if (IsA(node, ArrayCoerceExpr))
@@ -2020,12 +2076,12 @@ find_expr_references_walker(Node *node,
 		ArrayCoerceExpr *acoerce = (ArrayCoerceExpr *) node;
 
 		/* as above, depend on type */
-		add_object_address(TypeRelationId, acoerce->resulttype, 0,
+		add_object_address(OCLASS_TYPE, acoerce->resulttype, 0,
 						   context->addrs);
 		/* the collation might not be referenced anywhere else, either */
 		if (OidIsValid(acoerce->resultcollid) &&
 			acoerce->resultcollid != DEFAULT_COLLATION_OID)
-			add_object_address(CollationRelationId, acoerce->resultcollid, 0,
+			add_object_address(OCLASS_COLLATION, acoerce->resultcollid, 0,
 							   context->addrs);
 		/* fall through to examine arguments */
 	}
@@ -2034,21 +2090,21 @@ find_expr_references_walker(Node *node,
 		ConvertRowtypeExpr *cvt = (ConvertRowtypeExpr *) node;
 
 		/* since there is no function dependency, need to depend on type */
-		add_object_address(TypeRelationId, cvt->resulttype, 0,
+		add_object_address(OCLASS_TYPE, cvt->resulttype, 0,
 						   context->addrs);
 	}
 	else if (IsA(node, CollateExpr))
 	{
 		CollateExpr *coll = (CollateExpr *) node;
 
-		add_object_address(CollationRelationId, coll->collOid, 0,
+		add_object_address(OCLASS_COLLATION, coll->collOid, 0,
 						   context->addrs);
 	}
 	else if (IsA(node, RowExpr))
 	{
 		RowExpr    *rowexpr = (RowExpr *) node;
 
-		add_object_address(TypeRelationId, rowexpr->row_typeid, 0,
+		add_object_address(OCLASS_TYPE, rowexpr->row_typeid, 0,
 						   context->addrs);
 	}
 	else if (IsA(node, RowCompareExpr))
@@ -2058,12 +2114,12 @@ find_expr_references_walker(Node *node,
 
 		foreach(l, rcexpr->opnos)
 		{
-			add_object_address(OperatorRelationId, lfirst_oid(l), 0,
+			add_object_address(OCLASS_OPERATOR, lfirst_oid(l), 0,
 							   context->addrs);
 		}
 		foreach(l, rcexpr->opfamilies)
 		{
-			add_object_address(OperatorFamilyRelationId, lfirst_oid(l), 0,
+			add_object_address(OCLASS_OPFAMILY, lfirst_oid(l), 0,
 							   context->addrs);
 		}
 		/* fall through to examine arguments */
@@ -2072,14 +2128,14 @@ find_expr_references_walker(Node *node,
 	{
 		CoerceToDomain *cd = (CoerceToDomain *) node;
 
-		add_object_address(TypeRelationId, cd->resulttype, 0,
+		add_object_address(OCLASS_TYPE, cd->resulttype, 0,
 						   context->addrs);
 	}
 	else if (IsA(node, NextValueExpr))
 	{
 		NextValueExpr *nve = (NextValueExpr *) node;
 
-		add_object_address(RelationRelationId, nve->seqid, 0,
+		add_object_address(OCLASS_CLASS, nve->seqid, 0,
 						   context->addrs);
 	}
 	else if (IsA(node, OnConflictExpr))
@@ -2087,7 +2143,7 @@ find_expr_references_walker(Node *node,
 		OnConflictExpr *onconflict = (OnConflictExpr *) node;
 
 		if (OidIsValid(onconflict->constraint))
-			add_object_address(ConstraintRelationId, onconflict->constraint, 0,
+			add_object_address(OCLASS_CONSTRAINT, onconflict->constraint, 0,
 							   context->addrs);
 		/* fall through to examine arguments */
 	}
@@ -2095,10 +2151,10 @@ find_expr_references_walker(Node *node,
 	{
 		SortGroupClause *sgc = (SortGroupClause *) node;
 
-		add_object_address(OperatorRelationId, sgc->eqop, 0,
+		add_object_address(OCLASS_OPERATOR, sgc->eqop, 0,
 						   context->addrs);
 		if (OidIsValid(sgc->sortop))
-			add_object_address(OperatorRelationId, sgc->sortop, 0,
+			add_object_address(OCLASS_OPERATOR, sgc->sortop, 0,
 							   context->addrs);
 		return false;
 	}
@@ -2107,14 +2163,14 @@ find_expr_references_walker(Node *node,
 		WindowClause *wc = (WindowClause *) node;
 
 		if (OidIsValid(wc->startInRangeFunc))
-			add_object_address(ProcedureRelationId, wc->startInRangeFunc, 0,
+			add_object_address(OCLASS_PROC, wc->startInRangeFunc, 0,
 							   context->addrs);
 		if (OidIsValid(wc->endInRangeFunc))
-			add_object_address(ProcedureRelationId, wc->endInRangeFunc, 0,
+			add_object_address(OCLASS_PROC, wc->endInRangeFunc, 0,
 							   context->addrs);
 		if (OidIsValid(wc->inRangeColl) &&
 			wc->inRangeColl != DEFAULT_COLLATION_OID)
-			add_object_address(CollationRelationId, wc->inRangeColl, 0,
+			add_object_address(OCLASS_COLLATION, wc->inRangeColl, 0,
 							   context->addrs);
 		/* fall through to examine substructure */
 	}
@@ -2123,13 +2179,13 @@ find_expr_references_walker(Node *node,
 		CTECycleClause *cc = (CTECycleClause *) node;
 
 		if (OidIsValid(cc->cycle_mark_type))
-			add_object_address(TypeRelationId, cc->cycle_mark_type, 0,
+			add_object_address(OCLASS_TYPE, cc->cycle_mark_type, 0,
 							   context->addrs);
 		if (OidIsValid(cc->cycle_mark_collation))
-			add_object_address(CollationRelationId, cc->cycle_mark_collation, 0,
+			add_object_address(OCLASS_COLLATION, cc->cycle_mark_collation, 0,
 							   context->addrs);
 		if (OidIsValid(cc->cycle_mark_neop))
-			add_object_address(OperatorRelationId, cc->cycle_mark_neop, 0,
+			add_object_address(OCLASS_OPERATOR, cc->cycle_mark_neop, 0,
 							   context->addrs);
 		/* fall through to examine substructure */
 	}
@@ -2163,7 +2219,7 @@ find_expr_references_walker(Node *node,
 			switch (rte->rtekind)
 			{
 				case RTE_RELATION:
-					add_object_address(RelationRelationId, rte->relid, 0,
+					add_object_address(OCLASS_CLASS, rte->relid, 0,
 									   context->addrs);
 					break;
 				case RTE_JOIN:
@@ -2221,7 +2277,7 @@ find_expr_references_walker(Node *node,
 
 					if (tle->resjunk)
 						continue;	/* ignore junk tlist items */
-					add_object_address(RelationRelationId, rte->relid, tle->resno,
+					add_object_address(OCLASS_CLASS, rte->relid, tle->resno,
 									   context->addrs);
 				}
 			}
@@ -2232,7 +2288,7 @@ find_expr_references_walker(Node *node,
 		 */
 		foreach(lc, query->constraintDeps)
 		{
-			add_object_address(ConstraintRelationId, lfirst_oid(lc), 0,
+			add_object_address(OCLASS_CONSTRAINT, lfirst_oid(lc), 0,
 							   context->addrs);
 		}
 
@@ -2266,7 +2322,7 @@ find_expr_references_walker(Node *node,
 		 */
 		foreach(ct, rtfunc->funccoltypes)
 		{
-			add_object_address(TypeRelationId, lfirst_oid(ct), 0,
+			add_object_address(OCLASS_TYPE, lfirst_oid(ct), 0,
 							   context->addrs);
 		}
 		foreach(ct, rtfunc->funccolcollations)
@@ -2274,7 +2330,7 @@ find_expr_references_walker(Node *node,
 			Oid			collid = lfirst_oid(ct);
 
 			if (OidIsValid(collid) && collid != DEFAULT_COLLATION_OID)
-				add_object_address(CollationRelationId, collid, 0,
+				add_object_address(OCLASS_COLLATION, collid, 0,
 								   context->addrs);
 		}
 	}
@@ -2288,7 +2344,7 @@ find_expr_references_walker(Node *node,
 		 */
 		foreach(ct, tf->coltypes)
 		{
-			add_object_address(TypeRelationId, lfirst_oid(ct), 0,
+			add_object_address(OCLASS_TYPE, lfirst_oid(ct), 0,
 							   context->addrs);
 		}
 		foreach(ct, tf->colcollations)
@@ -2296,7 +2352,7 @@ find_expr_references_walker(Node *node,
 			Oid			collid = lfirst_oid(ct);
 
 			if (OidIsValid(collid) && collid != DEFAULT_COLLATION_OID)
-				add_object_address(CollationRelationId, collid, 0,
+				add_object_address(OCLASS_COLLATION, collid, 0,
 								   context->addrs);
 		}
 	}
@@ -2304,7 +2360,7 @@ find_expr_references_walker(Node *node,
 	{
 		TableSampleClause *tsc = (TableSampleClause *) node;
 
-		add_object_address(ProcedureRelationId, tsc->tsmhandler, 0,
+		add_object_address(OCLASS_PROC, tsc->tsmhandler, 0,
 						   context->addrs);
 		/* fall through to examine arguments */
 	}
@@ -2354,7 +2410,7 @@ process_function_rte_ref(RangeTblEntry *rte, AttrNumber attnum,
 
 				Assert(attnum - atts_done <= tupdesc->natts);
 				if (OidIsValid(reltype))	/* can this fail? */
-					add_object_address(RelationRelationId, reltype,
+					add_object_address(OCLASS_CLASS, reltype,
 									   attnum - atts_done,
 									   context->addrs);
 				return;
@@ -2501,9 +2557,12 @@ new_object_addresses(void)
 
 /*
  * Add an entry to an ObjectAddresses array.
+ *
+ * It is convenient to specify the class by ObjectClass rather than directly
+ * by catalog OID.
  */
 static void
-add_object_address(Oid classId, Oid objectId, int32 subId,
+add_object_address(ObjectClass oclass, Oid objectId, int32 subId,
 				   ObjectAddresses *addrs)
 {
 	ObjectAddress *item;
@@ -2518,7 +2577,7 @@ add_object_address(Oid classId, Oid objectId, int32 subId,
 	}
 	/* record this item */
 	item = addrs->refs + addrs->numrefs;
-	item->classId = classId;
+	item->classId = object_classes[oclass];
 	item->objectId = objectId;
 	item->objectSubId = subId;
 	addrs->numrefs++;
@@ -2779,6 +2838,153 @@ free_object_addresses(ObjectAddresses *addrs)
 }
 
 /*
+ * Determine the class of a given object identified by objectAddress.
+ *
+ * This function is essentially the reverse mapping for the object_classes[]
+ * table.  We implement it as a function because the OIDs aren't consecutive.
+ */
+ObjectClass
+getObjectClass(const ObjectAddress *object)
+{
+	/* only pg_class entries can have nonzero objectSubId */
+	if (object->classId != RelationRelationId &&
+		object->objectSubId != 0)
+		elog(ERROR, "invalid non-zero objectSubId for object class %u",
+			 object->classId);
+
+	switch (object->classId)
+	{
+		case RelationRelationId:
+			/* caller must check objectSubId */
+			return OCLASS_CLASS;
+
+		case ProcedureRelationId:
+			return OCLASS_PROC;
+
+		case TypeRelationId:
+			return OCLASS_TYPE;
+
+		case CastRelationId:
+			return OCLASS_CAST;
+
+		case CollationRelationId:
+			return OCLASS_COLLATION;
+
+		case ConstraintRelationId:
+			return OCLASS_CONSTRAINT;
+
+		case ConversionRelationId:
+			return OCLASS_CONVERSION;
+
+		case AttrDefaultRelationId:
+			return OCLASS_DEFAULT;
+
+		case LanguageRelationId:
+			return OCLASS_LANGUAGE;
+
+		case LargeObjectRelationId:
+			return OCLASS_LARGEOBJECT;
+
+		case OperatorRelationId:
+			return OCLASS_OPERATOR;
+
+		case OperatorClassRelationId:
+			return OCLASS_OPCLASS;
+
+		case OperatorFamilyRelationId:
+			return OCLASS_OPFAMILY;
+
+		case AccessMethodRelationId:
+			return OCLASS_AM;
+
+		case AccessMethodOperatorRelationId:
+			return OCLASS_AMOP;
+
+		case AccessMethodProcedureRelationId:
+			return OCLASS_AMPROC;
+
+		case RewriteRelationId:
+			return OCLASS_REWRITE;
+
+		case TriggerRelationId:
+			return OCLASS_TRIGGER;
+
+		case NamespaceRelationId:
+			return OCLASS_SCHEMA;
+
+		case StatisticExtRelationId:
+			return OCLASS_STATISTIC_EXT;
+
+		case TSParserRelationId:
+			return OCLASS_TSPARSER;
+
+		case TSDictionaryRelationId:
+			return OCLASS_TSDICT;
+
+		case TSTemplateRelationId:
+			return OCLASS_TSTEMPLATE;
+
+		case TSConfigRelationId:
+			return OCLASS_TSCONFIG;
+
+		case AuthIdRelationId:
+			return OCLASS_ROLE;
+
+		case AuthMemRelationId:
+			return OCLASS_ROLE_MEMBERSHIP;
+
+		case DatabaseRelationId:
+			return OCLASS_DATABASE;
+
+		case TableSpaceRelationId:
+			return OCLASS_TBLSPACE;
+
+		case ForeignDataWrapperRelationId:
+			return OCLASS_FDW;
+
+		case ForeignServerRelationId:
+			return OCLASS_FOREIGN_SERVER;
+
+		case UserMappingRelationId:
+			return OCLASS_USER_MAPPING;
+
+		case DefaultAclRelationId:
+			return OCLASS_DEFACL;
+
+		case ExtensionRelationId:
+			return OCLASS_EXTENSION;
+
+		case EventTriggerRelationId:
+			return OCLASS_EVENT_TRIGGER;
+
+		case ParameterAclRelationId:
+			return OCLASS_PARAMETER_ACL;
+
+		case PolicyRelationId:
+			return OCLASS_POLICY;
+
+		case PublicationNamespaceRelationId:
+			return OCLASS_PUBLICATION_NAMESPACE;
+
+		case PublicationRelationId:
+			return OCLASS_PUBLICATION;
+
+		case PublicationRelRelationId:
+			return OCLASS_PUBLICATION_REL;
+
+		case SubscriptionRelationId:
+			return OCLASS_SUBSCRIPTION;
+
+		case TransformRelationId:
+			return OCLASS_TRANSFORM;
+	}
+
+	/* shouldn't get here */
+	elog(ERROR, "unrecognized object class: %u", object->classId);
+	return OCLASS_CLASS;		/* keep compiler quiet */
+}
+
+/*
  * delete initial ACL for extension objects
  */
 static void
@@ -2786,7 +2992,6 @@ DeleteInitPrivs(const ObjectAddress *object)
 {
 	Relation	relation;
 	ScanKeyData key[3];
-	int			nkeys;
 	SysScanDesc scan;
 	HeapTuple	oldtuple;
 
@@ -2800,19 +3005,13 @@ DeleteInitPrivs(const ObjectAddress *object)
 				Anum_pg_init_privs_classoid,
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(object->classId));
-	if (object->objectSubId != 0)
-	{
-		ScanKeyInit(&key[2],
-					Anum_pg_init_privs_objsubid,
-					BTEqualStrategyNumber, F_INT4EQ,
-					Int32GetDatum(object->objectSubId));
-		nkeys = 3;
-	}
-	else
-		nkeys = 2;
+	ScanKeyInit(&key[2],
+				Anum_pg_init_privs_objsubid,
+				BTEqualStrategyNumber, F_INT4EQ,
+				Int32GetDatum(object->objectSubId));
 
 	scan = systable_beginscan(relation, InitPrivsObjIndexId, true,
-							  NULL, nkeys, key);
+							  NULL, 3, key);
 
 	while (HeapTupleIsValid(oldtuple = systable_getnext(scan)))
 		CatalogTupleDelete(relation, &oldtuple->t_self);

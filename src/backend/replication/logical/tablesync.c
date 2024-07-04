@@ -2,7 +2,7 @@
  * tablesync.c
  *	  PostgreSQL logical replication: initial table data synchronization
  *
- * Copyright (c) 2012-2024, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/replication/logical/tablesync.c
@@ -106,11 +106,10 @@
 #include "pgstat.h"
 #include "replication/logicallauncher.h"
 #include "replication/logicalrelation.h"
-#include "replication/logicalworker.h"
-#include "replication/origin.h"
-#include "replication/slot.h"
 #include "replication/walreceiver.h"
 #include "replication/worker_internal.h"
+#include "replication/slot.h"
+#include "replication/origin.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
 #include "utils/acl.h"
@@ -604,8 +603,7 @@ process_syncing_tables_for_apply(XLogRecPtr current_lsn)
 						TimestampDifferenceExceeds(hentry->last_start_time, now,
 												   wal_retrieve_retry_interval))
 					{
-						logicalrep_worker_launch(WORKERTYPE_TABLESYNC,
-												 MyLogicalRepWorker->dbid,
+						logicalrep_worker_launch(MyLogicalRepWorker->dbid,
 												 MySubscription->oid,
 												 MySubscription->name,
 												 MyLogicalRepWorker->userid,
@@ -666,29 +664,18 @@ process_syncing_tables_for_apply(XLogRecPtr current_lsn)
 void
 process_syncing_tables(XLogRecPtr current_lsn)
 {
-	switch (MyLogicalRepWorker->type)
-	{
-		case WORKERTYPE_PARALLEL_APPLY:
+	/*
+	 * Skip for parallel apply workers because they only operate on tables
+	 * that are in a READY state. See pa_can_start() and
+	 * should_apply_changes_for_rel().
+	 */
+	if (am_parallel_apply_worker())
+		return;
 
-			/*
-			 * Skip for parallel apply workers because they only operate on
-			 * tables that are in a READY state. See pa_can_start() and
-			 * should_apply_changes_for_rel().
-			 */
-			break;
-
-		case WORKERTYPE_TABLESYNC:
-			process_syncing_tables_for_sync(current_lsn);
-			break;
-
-		case WORKERTYPE_APPLY:
-			process_syncing_tables_for_apply(current_lsn);
-			break;
-
-		case WORKERTYPE_UNKNOWN:
-			/* Should never happen. */
-			elog(ERROR, "Unknown worker type");
-	}
+	if (am_tablesync_worker())
+		process_syncing_tables_for_sync(current_lsn);
+	else
+		process_syncing_tables_for_apply(current_lsn);
 }
 
 /*
@@ -1043,11 +1030,11 @@ fetch_remote_table_info(char *nspname, char *relname,
 
 		/* Build the pubname list. */
 		initStringInfo(&pub_names);
-		foreach_node(String, pubstr, MySubscription->publications)
+		foreach(lc, MySubscription->publications)
 		{
-			char	   *pubname = strVal(pubstr);
+			char	   *pubname = strVal(lfirst(lc));
 
-			if (foreach_current_index(pubstr) > 0)
+			if (foreach_current_index(lc) > 0)
 				appendStringInfoString(&pub_names, ", ");
 
 			appendStringInfoString(&pub_names, quote_literal_cstr(pubname));
@@ -1161,7 +1148,7 @@ copy_table(Relation rel)
 				appendStringInfoString(&cmd, quote_identifier(lrel.attnames[i]));
 			}
 
-			appendStringInfoChar(&cmd, ')');
+			appendStringInfoString(&cmd, ")");
 		}
 
 		appendStringInfoString(&cmd, " TO STDOUT");
@@ -1279,7 +1266,7 @@ ReplicationSlotNameForTablesync(Oid suboid, Oid relid,
  *
  * The returned slot name is palloc'ed in current memory context.
  */
-static char *
+char *
 LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 {
 	char	   *slotname;
@@ -1300,11 +1287,13 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 	relstate = GetSubscriptionRelState(MyLogicalRepWorker->subid,
 									   MyLogicalRepWorker->relid,
 									   &relstate_lsn);
-	CommitTransactionCommand();
 
 	/* Is the use of a password mandatory? */
 	must_use_password = MySubscription->passwordrequired &&
-		!MySubscription->ownersuperuser;
+		!superuser_arg(MySubscription->owner);
+
+	/* Note that the superuser_arg call can access the DB */
+	CommitTransactionCommand();
 
 	SpinLockAcquire(&MyLogicalRepWorker->relmutex);
 	MyLogicalRepWorker->relstate = relstate;
@@ -1336,7 +1325,7 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 	 * so that synchronous replication can distinguish them.
 	 */
 	LogRepWorkerWalRcvConn =
-		walrcv_connect(MySubscription->conninfo, true, true,
+		walrcv_connect(MySubscription->conninfo, true,
 					   must_use_password,
 					   slotname, &err);
 	if (LogRepWorkerWalRcvConn == NULL)
@@ -1437,7 +1426,6 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 	 */
 	walrcv_create_slot(LogRepWorkerWalRcvConn,
 					   slotname, false /* permanent */ , false /* two_phase */ ,
-					   MySubscription->failover,
 					   CRS_USE_SNAPSHOT, origin_startpos);
 
 	/*
@@ -1629,94 +1617,6 @@ FetchTableStates(bool *started_tx)
 	}
 
 	return has_subrels;
-}
-
-/*
- * Execute the initial sync with error handling. Disable the subscription,
- * if it's required.
- *
- * Allocate the slot name in long-lived context on return. Note that we don't
- * handle FATAL errors which are probably because of system resource error and
- * are not repeatable.
- */
-static void
-start_table_sync(XLogRecPtr *origin_startpos, char **slotname)
-{
-	char	   *sync_slotname = NULL;
-
-	Assert(am_tablesync_worker());
-
-	PG_TRY();
-	{
-		/* Call initial sync. */
-		sync_slotname = LogicalRepSyncTableStart(origin_startpos);
-	}
-	PG_CATCH();
-	{
-		if (MySubscription->disableonerr)
-			DisableSubscriptionAndExit();
-		else
-		{
-			/*
-			 * Report the worker failed during table synchronization. Abort
-			 * the current transaction so that the stats message is sent in an
-			 * idle state.
-			 */
-			AbortOutOfAnyTransaction();
-			pgstat_report_subscription_error(MySubscription->oid, false);
-
-			PG_RE_THROW();
-		}
-	}
-	PG_END_TRY();
-
-	/* allocate slot name in long-lived context */
-	*slotname = MemoryContextStrdup(ApplyContext, sync_slotname);
-	pfree(sync_slotname);
-}
-
-/*
- * Runs the tablesync worker.
- *
- * It starts syncing tables. After a successful sync, sets streaming options
- * and starts streaming to catchup with apply worker.
- */
-static void
-run_tablesync_worker()
-{
-	char		originname[NAMEDATALEN];
-	XLogRecPtr	origin_startpos = InvalidXLogRecPtr;
-	char	   *slotname = NULL;
-	WalRcvStreamOptions options;
-
-	start_table_sync(&origin_startpos, &slotname);
-
-	ReplicationOriginNameForLogicalRep(MySubscription->oid,
-									   MyLogicalRepWorker->relid,
-									   originname,
-									   sizeof(originname));
-
-	set_apply_error_context_origin(originname);
-
-	set_stream_options(&options, slotname, &origin_startpos);
-
-	walrcv_startstreaming(LogRepWorkerWalRcvConn, &options);
-
-	/* Apply the changes till we catchup with the apply worker. */
-	start_apply(origin_startpos);
-}
-
-/* Logical Replication Tablesync worker entry point */
-void
-TablesyncWorkerMain(Datum main_arg)
-{
-	int			worker_slot = DatumGetInt32(main_arg);
-
-	SetupApplyOrSyncWorker(worker_slot);
-
-	run_tablesync_worker();
-
-	finish_sync_worker();
 }
 
 /*

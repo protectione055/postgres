@@ -1331,7 +1331,14 @@ SELCT 1/0;<!-- this typo is intentional -->
      <member><varname>standard_conforming_strings</varname></member>
      <member><varname>TimeZone</varname></member>
     </simplelist>
-    (<varname>default_transaction_read_only</varname> and
+    (<varname>server_encoding</varname>, <varname>TimeZone</varname>, and
+    <varname>integer_datetimes</varname> were not reported by releases before 8.0;
+    <varname>standard_conforming_strings</varname> was not reported by releases
+    before 8.1;
+    <varname>IntervalStyle</varname> was not reported by releases before 8.4;
+    <varname>application_name</varname> was not reported by releases before
+    9.0;
+    <varname>default_transaction_read_only</varname> and
     <varname>in_hot_standby</varname> were not reported by releases before
     14; <varname>scram_iterations</varname> was not reported by releases
     before 16.)
@@ -1530,44 +1537,8 @@ SELCT 1/0;<!-- this typo is intentional -->
    </para>
 
    <para>
-     Likewise the server expects the client to not begin
-     the <acronym>SSL</acronym> negotiation until it receives the server's
-     single byte response to the <acronym>SSL</acronym> request.  If the
-     client begins the <acronym>SSL</acronym> negotiation immediately without
-     waiting for the server response to be received it can reduce connection
-     latency by one round-trip.  However this comes at the cost of not being
-     able to handle the case where the server sends a negative response to the
-     <acronym>SSL</acronym> request.  In that case instead of continuing with either GSSAPI or an
-     unencrypted connection or a protocol error the server will simply
-     disconnect.
-   </para>
-
-   <para>
     An initial SSLRequest can also be used in a connection that is being
     opened to send a CancelRequest message.
-   </para>
-
-   <para>
-     A second alternate way to initiate <acronym>SSL</acronym> encryption is
-     available.  The server will recognize connections which immediately
-     begin <acronym>SSL</acronym> negotiation without any previous SSLRequest
-     packets.  Once the <acronym>SSL</acronym> connection is established the
-     server will expect a normal startup-request packet and continue
-     negotiation over the encrypted channel.  In this case any other requests
-     for encryption will be refused.  This method is not preferred for general
-     purpose tools as it cannot negotiate the best connection encryption
-     available or handle unencrypted connections.  However it is useful for
-     environments where both the server and client are controlled together.
-     In that case it avoids one round trip of latency and allows the use of
-     network tools that depend on standard <acronym>SSL</acronym> connections.
-     When using <acronym>SSL</acronym> connections in this style the client is
-     required to use the ALPN extension defined
-     by <ulink url="https://tools.ietf.org/html/rfc7301">RFC 7301</ulink> to
-     protect against protocol confusion attacks.
-     The <productname>PostgreSQL</productname> protocol is "postgresql" as
-     registered
-     at <ulink url="https://www.iana.org/assignments/tls-extensiontype-values/tls-extensiontype-values.xhtml#alpn-protocol-ids">IANA
-     TLS ALPN Protocol IDs</ulink> registry.
    </para>
 
    <para>
@@ -2093,17 +2064,6 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
          </para>
         </listitem>
        </varlistentry>
-
-       <varlistentry>
-        <term><literal>FAILOVER [ <replaceable class="parameter">boolean</replaceable> ]</literal></term>
-        <listitem>
-         <para>
-          If true, the slot is enabled to be synced to the standbys
-          so that logical replication can be resumed after failover.
-          The default is false.
-         </para>
-        </listitem>
-       </varlistentry>
       </variablelist>
 
       <para>
@@ -2165,47 +2125,6 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
        For compatibility with older releases, this alternative syntax for
        the <literal>CREATE_REPLICATION_SLOT</literal> command is still supported.
       </para>
-     </listitem>
-    </varlistentry>
-
-    <varlistentry id="protocol-replication-alter-replication-slot" xreflabel="ALTER_REPLICATION_SLOT">
-     <term><literal>ALTER_REPLICATION_SLOT</literal> <replaceable class="parameter">slot_name</replaceable> ( <replaceable class="parameter">option</replaceable> [, ...] )
-      <indexterm><primary>ALTER_REPLICATION_SLOT</primary></indexterm>
-     </term>
-     <listitem>
-      <para>
-       Change the definition of a replication slot.
-       See <xref linkend="streaming-replication-slots"/> for more about
-       replication slots. This command is currently only supported for logical
-       replication slots.
-      </para>
-
-      <variablelist>
-       <varlistentry>
-        <term><replaceable class="parameter">slot_name</replaceable></term>
-        <listitem>
-         <para>
-          The name of the slot to alter. Must be a valid replication slot
-          name (see <xref linkend="streaming-replication-slots-manipulation"/>).
-         </para>
-        </listitem>
-       </varlistentry>
-      </variablelist>
-
-      <para>The following option is supported:</para>
-
-      <variablelist>
-       <varlistentry>
-        <term><literal>FAILOVER [ <replaceable class="parameter">boolean</replaceable> ]</literal></term>
-        <listitem>
-         <para>
-          If true, the slot is enabled to be synced to the standbys
-          so that logical replication can be resumed after failover.
-         </para>
-        </listitem>
-       </varlistentry>
-      </variablelist>
-
      </listitem>
     </varlistentry>
 
@@ -2307,10 +2226,8 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
       </para>
 
       <para>
-       WAL data is sent as a series of CopyData messages;
-       see <xref linkend="protocol-message-types"/> and <xref
-       linkend="protocol-message-formats"/> for details.
-       (This allows other information to be intermixed; in particular the server can send
+       WAL data is sent as a series of CopyData messages.  (This allows
+       other information to be intermixed; in particular the server can send
        an ErrorResponse message if it encounters a failure after beginning
        to stream.)  The payload of each CopyData message from server to the
        client contains a message of one of the following formats:
@@ -2524,12 +2441,11 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
            <term>Int32</term>
            <listitem>
             <para>
-             The standby's current global <literal>xmin</literal>, excluding the
-             <literal>catalog_xmin</literal> from any replication slots. If both
-             this value and the following <literal>catalog_xmin</literal>
-             are 0, this is treated as a notification that hot standby feedback
-             will no longer be sent on this connection. Later non-zero messages
-             may reinitiate the feedback mechanism.
+             The standby's current global xmin, excluding the catalog_xmin from any
+             replication slots. If both this value and the following
+             catalog_xmin are 0 this is treated as a notification that hot standby
+             feedback will no longer be sent on this connection. Later non-zero
+             messages may reinitiate the feedback mechanism.
             </para>
            </listitem>
           </varlistentry>
@@ -2538,7 +2454,7 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
            <term>Int32</term>
            <listitem>
             <para>
-             The epoch of the global <literal>xmin</literal> xid on the standby.
+             The epoch of the global xmin xid on the standby.
             </para>
            </listitem>
           </varlistentry>
@@ -2547,9 +2463,8 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
            <term>Int32</term>
            <listitem>
             <para>
-             The lowest <literal>catalog_xmin</literal> of any replication
-             slots on the standby. Set to 0 if no <literal>catalog_xmin</literal>
-             exists on the standby or if hot standby feedback is being
+             The lowest catalog_xmin of any replication slots on the standby. Set to 0
+             if no catalog_xmin exists on the standby or if hot standby feedback is being
              disabled.
             </para>
            </listitem>
@@ -2559,7 +2474,7 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
            <term>Int32</term>
            <listitem>
             <para>
-             The epoch of the <literal>catalog_xmin</literal> xid on the standby.
+             The epoch of the catalog_xmin xid on the standby.
             </para>
            </listitem>
           </varlistentry>
@@ -2684,19 +2599,6 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
         </listitem>
        </varlistentry>
       </variablelist>
-     </listitem>
-    </varlistentry>
-
-    <varlistentry id="protocol-replication-upload-manifest">
-     <term>
-      <literal>UPLOAD_MANIFEST</literal>
-      <indexterm><primary>UPLOAD_MANIFEST</primary></indexterm>
-     </term>
-     <listitem>
-      <para>
-       Uploads a backup manifest in preparation for taking an incremental
-       backup.
-      </para>
      </listitem>
     </varlistentry>
 
@@ -2939,17 +2841,6 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
           </para>
          </listitem>
         </varlistentry>
-
-        <varlistentry>
-         <term><literal>INCREMENTAL</literal></term>
-         <listitem>
-          <para>
-           Requests an incremental backup. The
-           <literal>UPLOAD_MANIFEST</literal> command must be executed
-           before running a base backup with this option.
-          </para>
-         </listitem>
-        </varlistentry>
        </variablelist>
       </para>
 
@@ -3176,13 +3067,6 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
      </listitem>
     </varlistentry>
    </variablelist>
-  </para>
-
-  <para>
-   In all the above commands,
-   when specifying a parameter of type <type>boolean</type> the
-   <replaceable class="parameter">value</replaceable> part can be omitted,
-   which is equivalent to specifying <literal>TRUE</literal>.
   </para>
  </sect1>
 

@@ -3,7 +3,7 @@
  * pgoutput.c
  *		Logical Replication output plugin
  *
- * Copyright (c) 2012-2024, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/backend/replication/pgoutput/pgoutput.c
@@ -22,6 +22,7 @@
 #include "executor/executor.h"
 #include "fmgr.h"
 #include "nodes/makefuncs.h"
+#include "optimizer/optimizer.h"
 #include "parser/parse_relation.h"
 #include "replication/logical.h"
 #include "replication/logicalproto.h"
@@ -80,6 +81,7 @@ static void pgoutput_stream_prepare_txn(LogicalDecodingContext *ctx,
 										ReorderBufferTXN *txn, XLogRecPtr prepare_lsn);
 
 static bool publications_valid;
+static bool in_streaming;
 
 static List *LoadPublications(List *pubnames);
 static void publication_invalidation_cb(Datum arg, int cacheid,
@@ -99,7 +101,7 @@ enum RowFilterPubAction
 {
 	PUBACTION_INSERT,
 	PUBACTION_UPDATE,
-	PUBACTION_DELETE,
+	PUBACTION_DELETE
 };
 
 #define NUM_ROWFILTER_PUBACTIONS (PUBACTION_DELETE+1)
@@ -378,37 +380,23 @@ parse_output_parameters(List *options, PGOutputData *data)
 		}
 		else if (strcmp(defel->defname, "origin") == 0)
 		{
-			char	   *origin;
-
 			if (origin_option_given)
 				ereport(ERROR,
 						errcode(ERRCODE_SYNTAX_ERROR),
 						errmsg("conflicting or redundant options"));
 			origin_option_given = true;
 
-			origin = defGetString(defel);
-			if (pg_strcasecmp(origin, LOGICALREP_ORIGIN_NONE) == 0)
-				data->publish_no_origin = true;
-			else if (pg_strcasecmp(origin, LOGICALREP_ORIGIN_ANY) == 0)
-				data->publish_no_origin = false;
-			else
+			data->origin = defGetString(defel);
+
+			if (pg_strcasecmp(data->origin, LOGICALREP_ORIGIN_NONE) != 0 &&
+				pg_strcasecmp(data->origin, LOGICALREP_ORIGIN_ANY) != 0)
 				ereport(ERROR,
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						errmsg("unrecognized origin value: \"%s\"", origin));
+						errmsg("unrecognized origin value: \"%s\"", data->origin));
 		}
 		else
 			elog(ERROR, "unrecognized pgoutput option: %s", defel->defname);
 	}
-
-	/* Check required options */
-	if (!protocol_version_given)
-		ereport(ERROR,
-				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				errmsg("proto_version option missing"));
-	if (!publication_names_given)
-		ereport(ERROR,
-				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				errmsg("publication_names option missing"));
 }
 
 /*
@@ -458,6 +446,11 @@ pgoutput_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt,
 					 errmsg("client sent proto_version=%d but server only supports protocol %d or higher",
 							data->protocol_version, LOGICALREP_PROTO_MIN_VERSION_NUM)));
 
+		if (data->publication_names == NIL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("publication_names parameter missing")));
+
 		/*
 		 * Decide whether to enable streaming. It is disabled by default, in
 		 * which case we just update the flag in decoding context. Otherwise
@@ -482,6 +475,9 @@ pgoutput_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt,
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("streaming requested, but not supported by output plugin")));
+
+		/* Also remember we're currently not streaming any transaction. */
+		in_streaming = false;
 
 		/*
 		 * Here, we just check whether the two-phase option is passed by
@@ -680,7 +676,6 @@ maybe_send_schema(LogicalDecodingContext *ctx,
 				  ReorderBufferChange *change,
 				  Relation relation, RelationSyncEntry *relentry)
 {
-	PGOutputData *data = (PGOutputData *) ctx->output_plugin_private;
 	bool		schema_sent;
 	TransactionId xid = InvalidTransactionId;
 	TransactionId topxid = InvalidTransactionId;
@@ -693,7 +688,7 @@ maybe_send_schema(LogicalDecodingContext *ctx,
 	 * If we're not in a streaming block, just use InvalidTransactionId and
 	 * the write methods will not include it.
 	 */
-	if (data->in_streaming)
+	if (in_streaming)
 		xid = change->txn->xid;
 
 	if (rbtxn_is_subtxn(change->txn))
@@ -713,7 +708,7 @@ maybe_send_schema(LogicalDecodingContext *ctx,
 	 * doing that we need to study its impact on the case where we have a mix
 	 * of streaming and non-streaming transactions.
 	 */
-	if (data->in_streaming)
+	if (in_streaming)
 		schema_sent = get_schema_sent_in_streamed_txn(relentry, topxid);
 	else
 		schema_sent = relentry->schema_sent;
@@ -737,7 +732,7 @@ maybe_send_schema(LogicalDecodingContext *ctx,
 
 	send_relation_and_attrs(relation, xid, ctx, relentry->columns);
 
-	if (data->in_streaming)
+	if (in_streaming)
 		set_schema_sent_in_streamed_txn(relentry, topxid);
 	else
 		relentry->schema_sent = true;
@@ -1423,7 +1418,7 @@ pgoutput_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 	 * their association and on aborts, it can discard the corresponding
 	 * changes.
 	 */
-	if (data->in_streaming)
+	if (in_streaming)
 		xid = change->txn->xid;
 
 	relentry = get_rel_sync_entry(data, relation);
@@ -1472,7 +1467,7 @@ pgoutput_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 	if (change->data.tp.oldtuple)
 	{
 		old_slot = relentry->old_slot;
-		ExecStoreHeapTuple(change->data.tp.oldtuple, old_slot, false);
+		ExecStoreHeapTuple(&change->data.tp.oldtuple->tuple, old_slot, false);
 
 		/* Convert tuple if needed. */
 		if (relentry->attrmap)
@@ -1487,7 +1482,7 @@ pgoutput_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 	if (change->data.tp.newtuple)
 	{
 		new_slot = relentry->new_slot;
-		ExecStoreHeapTuple(change->data.tp.newtuple, new_slot, false);
+		ExecStoreHeapTuple(&change->data.tp.newtuple->tuple, new_slot, false);
 
 		/* Convert tuple if needed. */
 		if (relentry->attrmap)
@@ -1554,16 +1549,6 @@ cleanup:
 		ancestor = NULL;
 	}
 
-	/* Drop the new slots that were used to store the converted tuples. */
-	if (relentry->attrmap)
-	{
-		if (old_slot)
-			ExecDropSingleTupleTableSlot(old_slot);
-
-		if (new_slot)
-			ExecDropSingleTupleTableSlot(new_slot);
-	}
-
 	MemoryContextSwitchTo(old);
 	MemoryContextReset(data->context);
 }
@@ -1582,7 +1567,7 @@ pgoutput_truncate(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 	TransactionId xid = InvalidTransactionId;
 
 	/* Remember the xid for the change in streaming mode. See pgoutput_change. */
-	if (data->in_streaming)
+	if (in_streaming)
 		xid = change->txn->xid;
 
 	old = MemoryContextSwitchTo(data->context);
@@ -1651,7 +1636,7 @@ pgoutput_message(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 	 * Remember the xid for the message in streaming mode. See
 	 * pgoutput_change.
 	 */
-	if (data->in_streaming)
+	if (in_streaming)
 		xid = txn->xid;
 
 	/*
@@ -1687,7 +1672,8 @@ pgoutput_origin_filter(LogicalDecodingContext *ctx,
 {
 	PGOutputData *data = (PGOutputData *) ctx->output_plugin_private;
 
-	if (data->publish_no_origin && origin_id != InvalidRepOriginId)
+	if (data->origin && (pg_strcasecmp(data->origin, LOGICALREP_ORIGIN_NONE) == 0) &&
+		origin_id != InvalidRepOriginId)
 		return true;
 
 	return false;
@@ -1754,11 +1740,10 @@ static void
 pgoutput_stream_start(struct LogicalDecodingContext *ctx,
 					  ReorderBufferTXN *txn)
 {
-	PGOutputData *data = (PGOutputData *) ctx->output_plugin_private;
 	bool		send_replication_origin = txn->origin_id != InvalidRepOriginId;
 
 	/* we can't nest streaming of transactions */
-	Assert(!data->in_streaming);
+	Assert(!in_streaming);
 
 	/*
 	 * If we already sent the first stream for this transaction then don't
@@ -1776,7 +1761,7 @@ pgoutput_stream_start(struct LogicalDecodingContext *ctx,
 	OutputPluginWrite(ctx, true);
 
 	/* we're streaming a chunk of transaction now */
-	data->in_streaming = true;
+	in_streaming = true;
 }
 
 /*
@@ -1786,17 +1771,15 @@ static void
 pgoutput_stream_stop(struct LogicalDecodingContext *ctx,
 					 ReorderBufferTXN *txn)
 {
-	PGOutputData *data = (PGOutputData *) ctx->output_plugin_private;
-
 	/* we should be streaming a transaction */
-	Assert(data->in_streaming);
+	Assert(in_streaming);
 
 	OutputPluginPrepareWrite(ctx, true);
 	logicalrep_write_stream_stop(ctx->out);
 	OutputPluginWrite(ctx, true);
 
 	/* we've stopped streaming a transaction */
-	data->in_streaming = false;
+	in_streaming = false;
 }
 
 /*
@@ -1816,7 +1799,7 @@ pgoutput_stream_abort(struct LogicalDecodingContext *ctx,
 	 * The abort should happen outside streaming block, even for streamed
 	 * transactions. The transaction has to be marked as streamed, though.
 	 */
-	Assert(!data->in_streaming);
+	Assert(!in_streaming);
 
 	/* determine the toplevel transaction */
 	toptxn = rbtxn_get_toptxn(txn);
@@ -1841,13 +1824,11 @@ pgoutput_stream_commit(struct LogicalDecodingContext *ctx,
 					   ReorderBufferTXN *txn,
 					   XLogRecPtr commit_lsn)
 {
-	PGOutputData *data PG_USED_FOR_ASSERTS_ONLY = (PGOutputData *) ctx->output_plugin_private;
-
 	/*
 	 * The commit should happen outside streaming block, even for streamed
 	 * transactions. The transaction has to be marked as streamed, though.
 	 */
-	Assert(!data->in_streaming);
+	Assert(!in_streaming);
 	Assert(rbtxn_is_streamed(txn));
 
 	OutputPluginUpdateProgress(ctx, false);
@@ -2243,6 +2224,7 @@ cleanup_rel_sync_cache(TransactionId xid, bool is_commit)
 {
 	HASH_SEQ_STATUS hash_seq;
 	RelationSyncEntry *entry;
+	ListCell   *lc;
 
 	Assert(RelationSyncCache != NULL);
 
@@ -2255,15 +2237,15 @@ cleanup_rel_sync_cache(TransactionId xid, bool is_commit)
 		 * corresponding schema and we don't need to send it unless there is
 		 * any invalidation for that relation.
 		 */
-		foreach_xid(streamed_txn, entry->streamed_txns)
+		foreach(lc, entry->streamed_txns)
 		{
-			if (xid == streamed_txn)
+			if (xid == lfirst_xid(lc))
 			{
 				if (is_commit)
 					entry->schema_sent = true;
 
 				entry->streamed_txns =
-					foreach_delete_current(entry->streamed_txns, streamed_txn);
+					foreach_delete_current(entry->streamed_txns, lc);
 				break;
 			}
 		}
@@ -2280,8 +2262,8 @@ rel_sync_cache_relation_cb(Datum arg, Oid relid)
 
 	/*
 	 * We can get here if the plugin was used in SQL interface as the
-	 * RelationSyncCache is destroyed when the decoding finishes, but there is
-	 * no way to unregister the relcache invalidation callback.
+	 * RelSchemaSyncCache is destroyed when the decoding finishes, but there
+	 * is no way to unregister the relcache invalidation callback.
 	 */
 	if (RelationSyncCache == NULL)
 		return;
@@ -2332,8 +2314,8 @@ rel_sync_cache_publication_cb(Datum arg, int cacheid, uint32 hashvalue)
 
 	/*
 	 * We can get here if the plugin was used in SQL interface as the
-	 * RelationSyncCache is destroyed when the decoding finishes, but there is
-	 * no way to unregister the invalidation callbacks.
+	 * RelSchemaSyncCache is destroyed when the decoding finishes, but there
+	 * is no way to unregister the invalidation callbacks.
 	 */
 	if (RelationSyncCache == NULL)
 		return;

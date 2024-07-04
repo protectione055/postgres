@@ -10,7 +10,6 @@ include $(top_builddir)/src/Makefile.global
 override CPPFLAGS := \
 	'-I$(top_builddir)/src/port' \
 	'-I$(top_srcdir)/src/test/regress' \
-	'-I$(libpq_srcdir)' \
 	'-DHOST_TUPLE="$(host_tuple)"' \
 	'-DSHELLPROG="$(SHELL)"' \
 	$(CPPFLAGS)
@@ -21,7 +20,7 @@ else
 abs_builddir := $(shell sh -c "pwd -W")
 endif
 
-all install installdirs uninstall:
+all install installdirs uninstall distprep:
 	$(MAKE) -C connect $@
 	$(MAKE) -C sql $@
 	$(MAKE) -C pgtypeslib $@
@@ -30,7 +29,7 @@ all install installdirs uninstall:
 	$(MAKE) -C compat_oracle $@
 	$(MAKE) -C thread $@
 
-clean distclean:
+clean distclean maintainer-clean:
 	$(MAKE) -C connect $@
 	$(MAKE) -C sql $@
 	$(MAKE) -C pgtypeslib $@
@@ -46,7 +45,7 @@ clean distclean:
 all: pg_regress$(X)
 
 pg_regress$(X): pg_regress_ecpg.o $(WIN32RES) $(top_builddir)/src/test/regress/pg_regress.o
-	$(CC) $(CFLAGS) $^ $(libpq_pgport) $(LDFLAGS) $(LDFLAGS_EX) $(LIBS) -o $@
+	$(CC) $(CFLAGS) $^ $(LDFLAGS) $(LDFLAGS_EX) $(LIBS) -o $@
 
 $(top_builddir)/src/test/regress/pg_regress.o:
 	$(MAKE) -C $(dir $@) $(notdir $@)

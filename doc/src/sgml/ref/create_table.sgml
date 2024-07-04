@@ -1000,8 +1000,7 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
 
      <para>
       Adding a unique constraint will automatically create a unique btree
-      index on the column or group of columns used in the constraint.  The
-      created index has the same name as the unique constraint.
+      index on the column or group of columns used in the constraint.
      </para>
 
      <para>
@@ -1053,8 +1052,7 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
 
      <para>
       Adding a <literal>PRIMARY KEY</literal> constraint will automatically
-      create a unique btree index on the column or group of columns used in
-      the constraint.  That index has the same name as the primary key
+      create a unique btree index on the column or group of columns used in the
       constraint.
      </para>
 
@@ -1093,8 +1091,8 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
 
      <para>
       Exclusion constraints are implemented using
-      an index that has the same name as the constraint, so each specified
-      operator must be associated with an appropriate operator class
+      an index, so each specified operator must be associated with an
+      appropriate operator class
       (see <xref linkend="indexes-opclass"/>) for the index access
       method <replaceable>index_method</replaceable>.
       Each <replaceable class="parameter">exclude_element</replaceable>
@@ -1301,10 +1299,6 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       information.  If this option is not specified, the default table access
       method is chosen for the new table. See <xref
       linkend="guc-default-table-access-method"/> for more information.
-     </para>
-     <para>
-      When creating a partition, the table access method is the access method
-      of its partitioned table, if set.
      </para>
     </listitem>
    </varlistentry>
@@ -2330,7 +2324,7 @@ CREATE TABLE cities_partdef
 
    <para>
     Currently, <productname>PostgreSQL</productname> does not record names
-    for not-null constraints at all, so they are not
+    for <literal>NOT NULL</literal> constraints at all, so they are not
     subject to the uniqueness restriction.  This might change in a future
     release.
    </para>

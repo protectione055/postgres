@@ -8,7 +8,7 @@
  * storage implementation and the details about individual types of
  * statistics.
  *
- * Copyright (c) 2001-2024, PostgreSQL Global Development Group
+ * Copyright (c) 2001-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/utils/activity/pgstat_wal.c
@@ -17,8 +17,8 @@
 
 #include "postgres.h"
 
-#include "executor/instrument.h"
 #include "utils/pgstat_internal.h"
+#include "executor/instrument.h"
 
 
 PgStat_PendingWalStats PendingWalStats = {0};

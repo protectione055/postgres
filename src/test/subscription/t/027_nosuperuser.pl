@@ -1,9 +1,9 @@
 
-# Copyright (c) 2021-2024, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 # Test that logical replication respects permissions
 use strict;
-use warnings FATAL => 'all';
+use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
@@ -105,7 +105,6 @@ for my $node ($node_publisher, $node_subscriber)
   CREATE ROLE regress_admin SUPERUSER LOGIN;
   CREATE ROLE regress_alice NOSUPERUSER LOGIN;
   GRANT CREATE ON DATABASE postgres TO regress_alice;
-  GRANT PG_CREATE_SUBSCRIPTION TO regress_alice;
   SET SESSION AUTHORIZATION regress_alice;
   CREATE SCHEMA alice;
   GRANT USAGE ON SCHEMA alice TO regress_admin;
@@ -304,29 +303,6 @@ GRANT SELECT ON alice.unpartitioned TO regress_alice;
 ));
 expect_replication("alice.unpartitioned", 3, 17, 21,
 	"restoring SELECT permission permits replication to continue");
-
-# The apply worker should get restarted after the superuser privileges are
-# revoked for subscription owner alice.
-grant_superuser("regress_alice");
-$node_subscriber->safe_psql(
-	'postgres', qq(
-SET SESSION AUTHORIZATION regress_alice;
-CREATE SUBSCRIPTION regression_sub CONNECTION '$publisher_connstr' PUBLICATION alice;
-));
-
-# Wait for initial sync to finish
-$node_subscriber->wait_for_subscription_sync($node_publisher,
-	'regression_sub');
-
-# Check the subscriber log from now on.
-$offset = -s $node_subscriber->logfile;
-
-revoke_superuser("regress_alice");
-
-# After the user becomes non-superuser the apply worker should be restarted.
-$node_subscriber->wait_for_log(
-	qr/LOG: ( [A-Z0-9]+:)? logical replication worker for subscription \"regression_sub\" will restart because the subscription owner's superuser privileges have been revoked/,
-	$offset);
 
 # If the subscription connection requires a password ('password_required'
 # is true) then a non-superuser must specify that password in the connection

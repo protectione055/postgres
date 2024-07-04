@@ -1,9 +1,9 @@
 
-# Copyright (c) 2021-2024, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 # Tests for disable_on_error and SKIP transaction features.
 use strict;
-use warnings FATAL => 'all';
+use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
@@ -26,11 +26,10 @@ sub test_skip_lsn
 		"SELECT subenabled = FALSE FROM pg_subscription WHERE subname = 'sub'"
 	);
 
-	# Get the finish LSN of the error transaction, mapping the expected
-	# ERROR with its CONTEXT when retrieving this information.
+	# Get the finish LSN of the error transaction.
 	my $contents = slurp_file($node_subscriber->logfile, $offset);
 	$contents =~
-	  qr/duplicate key value violates unique constraint "tbl_pkey".*\n.*DETAIL:.*\n.*CONTEXT:.* for replication target relation "public.tbl" in transaction \d+, finished at ([[:xdigit:]]+\/[[:xdigit:]]+)/m
+	  qr/processing remote data for replication origin \"pg_\d+\" during message type "INSERT" for replication target relation "public.tbl" in transaction \d+, finished at ([[:xdigit:]]+\/[[:xdigit:]]+)/
 	  or die "could not get error-LSN";
 	my $lsn = $1;
 
@@ -92,13 +91,13 @@ $node_subscriber->start;
 $node_publisher->safe_psql(
 	'postgres',
 	qq[
-CREATE TABLE tbl (i INT, t BYTEA);
+CREATE TABLE tbl (i INT, t TEXT);
 INSERT INTO tbl VALUES (1, NULL);
 ]);
 $node_subscriber->safe_psql(
 	'postgres',
 	qq[
-CREATE TABLE tbl (i INT PRIMARY KEY, t BYTEA);
+CREATE TABLE tbl (i INT PRIMARY KEY, t TEXT);
 INSERT INTO tbl VALUES (1, NULL);
 ]);
 
@@ -164,11 +163,10 @@ $node_publisher->safe_psql(
 	'postgres',
 	qq[
 BEGIN;
-INSERT INTO tbl SELECT i, sha256(i::text::bytea) FROM generate_series(1, 10000) s(i);
+INSERT INTO tbl SELECT i, md5(i::text) FROM generate_series(1, 10000) s(i);
 COMMIT;
 ]);
-test_skip_lsn($node_publisher, $node_subscriber,
-	"(4, sha256(4::text::bytea))",
+test_skip_lsn($node_publisher, $node_subscriber, "(4, md5(4::text))",
 	"4", "test skipping stream-commit");
 
 $result = $node_subscriber->safe_psql('postgres',

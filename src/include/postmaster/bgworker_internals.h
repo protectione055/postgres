@@ -2,7 +2,7 @@
  * bgworker_internals.h
  *		POSTGRES pluggable background workers internals
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -54,7 +54,11 @@ extern void BackgroundWorkerStopNotifications(pid_t pid);
 extern void ForgetUnstartedBackgroundWorkers(void);
 extern void ResetBackgroundWorkerCrashTimes(void);
 
-/* Entry point for background worker processes */
-extern void BackgroundWorkerMain(char *startup_data, size_t startup_data_len) pg_attribute_noreturn();
+/* Function to start a background worker, called from postmaster.c */
+extern void StartBackgroundWorker(void) pg_attribute_noreturn();
+
+#ifdef EXEC_BACKEND
+extern BackgroundWorker *BackgroundWorkerEntry(int slotno);
+#endif
 
 #endif							/* BGWORKER_INTERNALS_H */

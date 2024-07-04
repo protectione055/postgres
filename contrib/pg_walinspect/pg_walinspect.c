@@ -3,7 +3,7 @@
  * pg_walinspect.c
  *		  Functions to inspect contents of PostgreSQL Write-Ahead Log
  *
- * Copyright (c) 2022-2024, PostgreSQL Global Development Group
+ * Copyright (c) 2022-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  contrib/pg_walinspect/pg_walinspect.c
@@ -101,8 +101,7 @@ InitXLogReaderState(XLogRecPtr lsn)
 	 */
 	if (lsn < XLOG_BLCKSZ)
 		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("could not read WAL at LSN %X/%X",
+				(errmsg("could not read WAL at LSN %X/%X",
 						LSN_FORMAT_ARGS(lsn))));
 
 	private_data = (ReadLocalXLogPageNoWaitPrivate *)

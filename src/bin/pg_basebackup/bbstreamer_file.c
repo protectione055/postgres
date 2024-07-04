@@ -2,7 +2,7 @@
  *
  * bbstreamer_file.c
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/bbstreamer_file.c
@@ -14,8 +14,8 @@
 #include <unistd.h>
 
 #include "bbstreamer.h"
-#include "common/file_perm.h"
 #include "common/logging.h"
+#include "common/file_perm.h"
 #include "common/string.h"
 
 typedef struct bbstreamer_plain_writer
@@ -43,7 +43,7 @@ static void bbstreamer_plain_writer_content(bbstreamer *streamer,
 static void bbstreamer_plain_writer_finalize(bbstreamer *streamer);
 static void bbstreamer_plain_writer_free(bbstreamer *streamer);
 
-static const bbstreamer_ops bbstreamer_plain_writer_ops = {
+const bbstreamer_ops bbstreamer_plain_writer_ops = {
 	.content = bbstreamer_plain_writer_content,
 	.finalize = bbstreamer_plain_writer_finalize,
 	.free = bbstreamer_plain_writer_free
@@ -59,7 +59,7 @@ static void extract_directory(const char *filename, mode_t mode);
 static void extract_link(const char *filename, const char *linktarget);
 static FILE *create_file_for_extract(const char *filename, mode_t mode);
 
-static const bbstreamer_ops bbstreamer_extractor_ops = {
+const bbstreamer_ops bbstreamer_extractor_ops = {
 	.content = bbstreamer_extractor_content,
 	.finalize = bbstreamer_extractor_finalize,
 	.free = bbstreamer_extractor_free
@@ -296,7 +296,6 @@ should_allow_existing_directory(const char *pathname)
 	if (strcmp(filename, "pg_wal") == 0 ||
 		strcmp(filename, "pg_xlog") == 0 ||
 		strcmp(filename, "archive_status") == 0 ||
-		strcmp(filename, "summaries") == 0 ||
 		strcmp(filename, "pg_tblspc") == 0)
 		return true;
 

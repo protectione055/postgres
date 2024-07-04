@@ -4,7 +4,7 @@
  *	  XML data type support.
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/utils/adt/xml.c
@@ -47,7 +47,6 @@
 
 #ifdef USE_LIBXML
 #include <libxml/chvalid.h>
-#include <libxml/entities.h>
 #include <libxml/parser.h>
 #include <libxml/parserInternals.h>
 #include <libxml/tree.h>
@@ -100,6 +99,7 @@
 #include "utils/date.h"
 #include "utils/datetime.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/xml.h"
@@ -222,14 +222,14 @@ static void XmlTableDestroyOpaque(struct TableFuncScanState *state);
 
 const TableFuncRoutine XmlTableRoutine =
 {
-	.InitOpaque = XmlTableInitOpaque,
-	.SetDocument = XmlTableSetDocument,
-	.SetNamespace = XmlTableSetNamespace,
-	.SetRowFilter = XmlTableSetRowFilter,
-	.SetColumnFilter = XmlTableSetColumnFilter,
-	.FetchRow = XmlTableFetchRow,
-	.GetValue = XmlTableGetValue,
-	.DestroyOpaque = XmlTableDestroyOpaque
+	XmlTableInitOpaque,
+	XmlTableSetDocument,
+	XmlTableSetNamespace,
+	XmlTableSetRowFilter,
+	XmlTableSetColumnFilter,
+	XmlTableFetchRow,
+	XmlTableGetValue,
+	XmlTableDestroyOpaque
 };
 
 #define NO_XML_SUPPORT() \
@@ -522,27 +522,6 @@ xmlcomment(PG_FUNCTION_ARGS)
 #endif
 }
 
-
-Datum
-xmltext(PG_FUNCTION_ARGS)
-{
-#ifdef USE_LIBXML
-	text	   *arg = PG_GETARG_TEXT_PP(0);
-	text	   *result;
-	xmlChar    *xmlbuf = NULL;
-
-	xmlbuf = xmlEncodeSpecialChars(NULL, xml_text2xmlChar(arg));
-
-	Assert(xmlbuf);
-
-	result = cstring_to_text_with_len((const char *) xmlbuf, xmlStrlen(xmlbuf));
-	xmlFree(xmlbuf);
-	PG_RETURN_XML_P(result);
-#else
-	NO_XML_SUPPORT();
-	return 0;
-#endif							/* not USE_LIBXML */
-}
 
 
 /*
@@ -2163,7 +2142,8 @@ xml_errorHandler(void *data, PgXmlErrorPtr error)
 		appendBinaryStringInfo(&xmlerrcxt->err_buf, errorBuf->data,
 							   errorBuf->len);
 
-		destroyStringInfo(errorBuf);
+		pfree(errorBuf->data);
+		pfree(errorBuf);
 		return;
 	}
 
@@ -2194,7 +2174,8 @@ xml_errorHandler(void *data, PgXmlErrorPtr error)
 				(errmsg_internal("%s", errorBuf->data)));
 	}
 
-	destroyStringInfo(errorBuf);
+	pfree(errorBuf->data);
+	pfree(errorBuf);
 }
 
 

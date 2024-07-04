@@ -1,12 +1,14 @@
 
-# Copyright (c) 2021-2024, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 # Test for timeline switch
 use strict;
-use warnings FATAL => 'all';
+use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+
+$ENV{PGDATABASE} = 'postgres';
 
 # Ensure that a cascading standby is able to follow a newly-promoted standby
 # on a new timeline.

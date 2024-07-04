@@ -3,7 +3,7 @@
  * nodeGather.c
  *	  Support routines for scanning a plan via multiple workers.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * A Gather executor launches parallel workers to run multiple copies of a
@@ -30,13 +30,18 @@
 
 #include "postgres.h"
 
+#include "access/relscan.h"
+#include "access/xact.h"
+#include "executor/execdebug.h"
 #include "executor/execParallel.h"
-#include "executor/executor.h"
 #include "executor/nodeGather.h"
+#include "executor/nodeSubplan.h"
 #include "executor/tqueue.h"
 #include "miscadmin.h"
 #include "optimizer/optimizer.h"
-#include "utils/wait_event.h"
+#include "pgstat.h"
+#include "utils/memutils.h"
+#include "utils/rel.h"
 
 
 static TupleTableSlot *ExecGather(PlanState *pstate);
@@ -245,6 +250,9 @@ ExecEndGather(GatherState *node)
 {
 	ExecEndNode(outerPlanState(node));	/* let children clean up first */
 	ExecShutdownGather(node);
+	ExecFreeExprContext(&node->ps);
+	if (node->ps.ps_ResultTupleSlot)
+		ExecClearTuple(node->ps.ps_ResultTupleSlot);
 }
 
 /*

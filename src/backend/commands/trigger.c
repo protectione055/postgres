@@ -3,7 +3,7 @@
  * trigger.c
  *	  PostgreSQL TRIGGERs support code.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -22,6 +22,7 @@
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
+#include "catalog/index.h"
 #include "catalog/indexing.h"
 #include "catalog/objectaccess.h"
 #include "catalog/partition.h"
@@ -31,8 +32,10 @@
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
+#include "commands/defrem.h"
 #include "commands/trigger.h"
 #include "executor/executor.h"
+#include "executor/execPartition.h"
 #include "miscadmin.h"
 #include "nodes/bitmapset.h"
 #include "nodes/makefuncs.h"
@@ -41,12 +44,16 @@
 #include "parser/parse_collate.h"
 #include "parser/parse_func.h"
 #include "parser/parse_relation.h"
+#include "parser/parsetree.h"
 #include "partitioning/partdesc.h"
 #include "pgstat.h"
 #include "rewrite/rewriteManip.h"
+#include "storage/bufmgr.h"
 #include "storage/lmgr.h"
+#include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/bytea.h"
 #include "utils/fmgroids.h"
 #include "utils/guc_hooks.h"
 #include "utils/inval.h"
@@ -1519,7 +1526,6 @@ renametrig(RenameStmt *stmt)
 		 */
 		if (OidIsValid(trigform->tgparentid))
 			ereport(ERROR,
-					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					errmsg("cannot rename trigger \"%s\" on table \"%s\"",
 						   stmt->subname, RelationGetRelationName(targetrel)),
 					errhint("Rename the trigger on the partitioned table \"%s\" instead.",
@@ -3998,8 +4004,8 @@ afterTriggerCheckState(AfterTriggerShared evtshared)
 static Bitmapset *
 afterTriggerCopyBitmap(Bitmapset *src)
 {
-	Bitmapset  *dst;
-	MemoryContext oldcxt;
+	Bitmapset	   *dst;
+	MemoryContext	oldcxt;
 
 	if (src == NULL)
 		return NULL;
@@ -4290,12 +4296,8 @@ AfterTriggerExecute(EState *estate,
 	bool		should_free_new = false;
 
 	/*
-	 * Locate trigger in trigdesc.  It might not be present, and in fact the
-	 * trigdesc could be NULL, if the trigger was dropped since the event was
-	 * queued.  In that case, silently do nothing.
+	 * Locate trigger in trigdesc.
 	 */
-	if (trigdesc == NULL)
-		return;
 	for (tgindx = 0; tgindx < trigdesc->numtriggers; tgindx++)
 	{
 		if (trigdesc->triggers[tgindx].tgoid == tgoid)
@@ -4305,7 +4307,7 @@ AfterTriggerExecute(EState *estate,
 		}
 	}
 	if (LocTriggerData.tg_trigger == NULL)
-		return;
+		elog(ERROR, "could not find trigger %u", tgoid);
 
 	/*
 	 * If doing EXPLAIN ANALYZE, start charging time to this trigger. We want
@@ -4686,7 +4688,6 @@ afterTriggerInvokeEvents(AfterTriggerEventList *events,
 					/* Catch calls with insufficient relcache refcounting */
 					Assert(!RelationHasReferenceCountZero(rel));
 					trigdesc = rInfo->ri_TrigDesc;
-					/* caution: trigdesc could be NULL here */
 					finfo = rInfo->ri_TrigFunctions;
 					instr = rInfo->ri_TrigInstrument;
 					if (slot1 != NULL)
@@ -4702,6 +4703,9 @@ afterTriggerInvokeEvents(AfterTriggerEventList *events,
 						slot2 = MakeSingleTupleTableSlot(rel->rd_att,
 														 &TTSOpsMinimalTuple);
 					}
+					if (trigdesc == NULL)	/* should not happen */
+						elog(ERROR, "relation %u has no triggers",
+							 evtshared->ats_relid);
 				}
 
 				/*

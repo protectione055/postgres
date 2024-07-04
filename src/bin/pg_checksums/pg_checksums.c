@@ -4,7 +4,7 @@
  *	  Checks, enables or disables page level checksums for an offline
  *	  cluster
  *
- * Copyright (c) 2010-2024, PostgreSQL Global Development Group
+ * Copyright (c) 2010-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/bin/pg_checksums/pg_checksums.c
@@ -20,11 +20,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "access/xlog_internal.h"
 #include "common/controldata_utils.h"
 #include "common/file_perm.h"
 #include "common/file_utils.h"
 #include "common/logging.h"
-#include "common/relpath.h"
 #include "fe_utils/option_utils.h"
 #include "getopt_long.h"
 #include "pg_getopt.h"
@@ -44,14 +44,23 @@ static char *only_filenode = NULL;
 static bool do_sync = true;
 static bool verbose = false;
 static bool showprogress = false;
-static DataDirSyncMethod sync_method = DATA_DIR_SYNC_METHOD_FSYNC;
 
 typedef enum
 {
 	PG_MODE_CHECK,
 	PG_MODE_DISABLE,
-	PG_MODE_ENABLE,
+	PG_MODE_ENABLE
 } PgChecksumMode;
+
+/*
+ * Filename components.
+ *
+ * XXX: fd.h is not declared here as frontend side code is not able to
+ * interact with the backend-side definitions for the various fsync
+ * wrappers.
+ */
+#define PG_TEMP_FILES_DIR "pgsql_tmp"
+#define PG_TEMP_FILE_PREFIX "pgsql_tmp"
 
 static PgChecksumMode mode = PG_MODE_CHECK;
 
@@ -60,8 +69,8 @@ static const char *progname;
 /*
  * Progress status information.
  */
-static int64 total_size = 0;
-static int64 current_size = 0;
+int64		total_size = 0;
+int64		current_size = 0;
 static pg_time_t last_progress_report = 0;
 
 static void
@@ -78,7 +87,6 @@ usage(void)
 	printf(_("  -f, --filenode=FILENODE  check only relation with specified filenode\n"));
 	printf(_("  -N, --no-sync            do not wait for changes to be written safely to disk\n"));
 	printf(_("  -P, --progress           show progress information\n"));
-	printf(_("      --sync-method=METHOD set method for syncing files to disk\n"));
 	printf(_("  -v, --verbose            output verbose messages\n"));
 	printf(_("  -V, --version            output version information, then exit\n"));
 	printf(_("  -?, --help               show this help, then exit\n"));
@@ -441,7 +449,6 @@ main(int argc, char *argv[])
 		{"no-sync", no_argument, NULL, 'N'},
 		{"progress", no_argument, NULL, 'P'},
 		{"verbose", no_argument, NULL, 'v'},
-		{"sync-method", required_argument, NULL, 1},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -499,10 +506,6 @@ main(int argc, char *argv[])
 				break;
 			case 'v':
 				verbose = true;
-				break;
-			case 1:
-				if (!parse_sync_method(optarg, &sync_method))
-					exit(1);
 				break;
 			default:
 				/* getopt_long already emitted a complaint */
@@ -634,7 +637,7 @@ main(int argc, char *argv[])
 		if (do_sync)
 		{
 			pg_log_info("syncing data directory");
-			sync_pgdata(DataDir, PG_VERSION_NUM, sync_method);
+			fsync_pgdata(DataDir, PG_VERSION_NUM);
 		}
 
 		pg_log_info("updating control file");

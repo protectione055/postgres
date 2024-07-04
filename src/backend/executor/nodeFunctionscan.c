@@ -3,7 +3,7 @@
  * nodeFunctionscan.c
  *	  Support routines for scanning RangeFunctions (functions in rangetable).
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -26,6 +26,7 @@
 #include "executor/nodeFunctionscan.h"
 #include "funcapi.h"
 #include "nodes/nodeFuncs.h"
+#include "utils/builtins.h"
 #include "utils/memutils.h"
 
 
@@ -532,11 +533,26 @@ ExecEndFunctionScan(FunctionScanState *node)
 	int			i;
 
 	/*
+	 * Free the exprcontext
+	 */
+	ExecFreeExprContext(&node->ss.ps);
+
+	/*
+	 * clean out the tuple table
+	 */
+	if (node->ss.ps.ps_ResultTupleSlot)
+		ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
+	ExecClearTuple(node->ss.ss_ScanTupleSlot);
+
+	/*
 	 * Release slots and tuplestore resources
 	 */
 	for (i = 0; i < node->nfuncs; i++)
 	{
 		FunctionScanPerFuncState *fs = &node->funcstates[i];
+
+		if (fs->func_slot)
+			ExecClearTuple(fs->func_slot);
 
 		if (fs->tstore != NULL)
 		{

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, PostgreSQL Global Development Group
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
 
 # can't run ecpg to build test dependencies, at least not without an emulator
 if meson.is_cross_build()
@@ -18,7 +18,7 @@ pg_regress_ecpg = executable('pg_regress_ecpg',
   pg_regress_ecpg_sources,
   c_args: pg_regress_cflags,
   include_directories: [pg_regress_inc, include_directories('.')],
-  dependencies: [frontend_code, libpq],
+  dependencies: [frontend_code],
   kwargs: default_bin_args + {
     'install': false
   },
@@ -45,9 +45,10 @@ ecpg_preproc_test_command_start = [
   '--regression',
   '-I@CURRENT_SOURCE_DIR@',
   '-I@SOURCE_ROOT@' + '/src/interfaces/ecpg/include/',
+  '-o', '@OUTPUT@',
 ]
 ecpg_preproc_test_command_end = [
-  '-o', '@OUTPUT@', '@INPUT@'
+  '@INPUT@'
 ]
 
 ecpg_test_dependencies = []

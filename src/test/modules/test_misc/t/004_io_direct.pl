@@ -1,10 +1,7 @@
-
-# Copyright (c) 2024, PostgreSQL Global Development Group
-
 # Very simple exercise of direct I/O GUC.
 
 use strict;
-use warnings FATAL => 'all';
+use warnings;
 use Fcntl;
 use IO::File;
 use PostgreSQL::Test::Cluster;

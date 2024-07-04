@@ -28,15 +28,13 @@ SET SESSION AUTHORIZATION pg_read_all_stats;
 SELECT pg_stat_statements_reset();
 RESET SESSION AUTHORIZATION;
 SELECT pg_get_functiondef('pg_stat_statements_reset'::regproc);
-SELECT pg_stat_statements_reset();
 \d pg_stat_statements
 SELECT count(*) > 0 AS has_data FROM pg_stat_statements;
 
 -- New functions and views for pg_stat_statements in 1.8
 AlTER EXTENSION pg_stat_statements UPDATE TO '1.8';
-SELECT pg_get_functiondef('pg_stat_statements_reset'::regproc);
 \d pg_stat_statements
-SELECT count(*) > 0 AS has_data FROM pg_stat_statements;
+SELECT pg_get_functiondef('pg_stat_statements_reset'::regproc);
 
 -- New function pg_stat_statement_info, and new function
 -- and view for pg_stat_statements introduced in 1.9
@@ -49,13 +47,5 @@ SELECT count(*) > 0 AS has_data FROM pg_stat_statements;
 AlTER EXTENSION pg_stat_statements UPDATE TO '1.10';
 \d pg_stat_statements
 SELECT count(*) > 0 AS has_data FROM pg_stat_statements;
-
--- New functions and views for pg_stat_statements in 1.11
-AlTER EXTENSION pg_stat_statements UPDATE TO '1.11';
-\d pg_stat_statements
-SELECT count(*) > 0 AS has_data FROM pg_stat_statements;
--- New parameter minmax_only of pg_stat_statements_reset function
-SELECT pg_get_functiondef('pg_stat_statements_reset'::regproc);
-SELECT pg_stat_statements_reset() IS NOT NULL AS t;
 
 DROP EXTENSION pg_stat_statements;

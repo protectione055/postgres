@@ -4,10 +4,10 @@
 # (see UAX #15).  Pass DerivedNormalizationProps.txt as argument.  The
 # output is on stdout.
 #
-# Copyright (c) 2020-2024, PostgreSQL Global Development Group
+# Copyright (c) 2020-2023, PostgreSQL Global Development Group
 
 use strict;
-use warnings FATAL => 'all';
+use warnings;
 
 use FindBin;
 use lib "$FindBin::RealBin/../../tools/";

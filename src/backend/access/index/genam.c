@@ -3,7 +3,7 @@
  * genam.c
  *	  general index access method routines
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -20,6 +20,7 @@
 #include "postgres.h"
 
 #include "access/genam.h"
+#include "access/heapam.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
 #include "access/transam.h"
@@ -29,11 +30,13 @@
 #include "storage/bufmgr.h"
 #include "storage/procarray.h"
 #include "utils/acl.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/rls.h"
 #include "utils/ruleutils.h"
 #include "utils/snapmgr.h"
+#include "utils/syscache.h"
 
 
 /* ----------------------------------------------------------------
@@ -172,7 +175,7 @@ IndexScanEnd(IndexScanDesc scan)
  */
 char *
 BuildIndexValueDescription(Relation indexRelation,
-						   const Datum *values, const bool *isnull)
+						   Datum *values, bool *isnull)
 {
 	StringInfoData buf;
 	Form_pg_index idxrec;

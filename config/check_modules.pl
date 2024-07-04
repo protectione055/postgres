@@ -1,6 +1,3 @@
-
-# Copyright (c) 2024, PostgreSQL Global Development Group
-
 #
 # Verify that required Perl modules are available,
 # in at least the required minimum versions.
@@ -8,7 +5,7 @@
 # but specify them anyway for documentation's sake.)
 #
 use strict;
-use warnings FATAL => 'all';
+use warnings;
 use Config;
 
 use IPC::Run 0.79;

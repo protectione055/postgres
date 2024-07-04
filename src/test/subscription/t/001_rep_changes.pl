@@ -1,9 +1,9 @@
 
-# Copyright (c) 2021-2024, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 # Basic logical replication test
 use strict;
-use warnings FATAL => 'all';
+use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
@@ -15,7 +15,7 @@ $node_publisher->start;
 
 # Create subscriber node
 my $node_subscriber = PostgreSQL::Test::Cluster->new('subscriber');
-$node_subscriber->init;
+$node_subscriber->init(allows_streaming => 'logical');
 $node_subscriber->start;
 
 # Create some preexisting content on publisher
@@ -573,7 +573,7 @@ CREATE PUBLICATION tap_pub2 FOR TABLE skip_wal;
 ROLLBACK;
 });
 ok( $reterr =~
-	  m/WARNING:  "wal_level" is insufficient to publish logical changes/,
-	'CREATE PUBLICATION while "wal_level=minimal"');
+	  m/WARNING:  wal_level is insufficient to publish logical changes/,
+	'CREATE PUBLICATION while wal_level=minimal');
 
 done_testing();

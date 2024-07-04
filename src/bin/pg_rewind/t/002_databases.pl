@@ -1,8 +1,8 @@
 
-# Copyright (c) 2021-2024, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 use strict;
-use warnings FATAL => 'all';
+use warnings;
 use PostgreSQL::Test::Utils;
 use Test::More;
 
@@ -60,7 +60,7 @@ template1
   SKIP:
 	{
 		skip "unix-style permissions not supported on Windows", 1
-		  if ($windows_os || $Config::Config{osname} eq 'cygwin');
+		  if ($windows_os);
 
 		ok(check_mode_recursive($node_primary->data_dir(), 0750, 0640),
 			'check PGDATA permissions');

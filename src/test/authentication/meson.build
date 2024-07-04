@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, PostgreSQL Global Development Group
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
 
 tests += {
   'name': 'authentication',
@@ -11,7 +11,6 @@ tests += {
       't/003_peer.pl',
       't/004_file_inclusion.pl',
       't/005_sspi.pl',
-      't/006_login_trigger.pl',
     ],
   },
 }

@@ -4,7 +4,7 @@
  *	  creator functions for various nodes. The functions here are for the
  *	  most frequently created nodes.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -19,6 +19,7 @@
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "utils/errcodes.h"
 #include "utils/lsyscache.h"
 
 
@@ -538,22 +539,6 @@ makeFuncExpr(Oid funcid, Oid rettype, List *args,
 }
 
 /*
- * makeStringConst -
- * 	build a A_Const node of type T_String for given string
- */
-Node *
-makeStringConst(char *str, int location)
-{
-	A_Const    *n = makeNode(A_Const);
-
-	n->val.sval.type = T_String;
-	n->val.sval.sval = str;
-	n->location = location;
-
-	return (Node *) n;
-}
-
-/*
  * makeDefElem -
  *	build a DefElem node
  *
@@ -792,6 +777,9 @@ makeIndexInfo(int numattrs, int numkeyattrs, Oid amoid, List *expressions,
 	n->ii_ExclusionProcs = NULL;
 	n->ii_ExclusionStrats = NULL;
 
+	/* opclass options */
+	n->ii_OpclassOptions = NULL;
+
 	/* speculative inserts */
 	n->ii_UniqueOps = NULL;
 	n->ii_UniqueProcs = NULL;
@@ -873,19 +861,24 @@ makeJsonValueExpr(Expr *raw_expr, Expr *formatted_expr,
 }
 
 /*
- * makeJsonBehavior -
- *	  creates a JsonBehavior node
+ * makeJsonEncoding -
+ *	  converts JSON encoding name to enum JsonEncoding
  */
-JsonBehavior *
-makeJsonBehavior(JsonBehaviorType btype, Node *expr, int location)
+JsonEncoding
+makeJsonEncoding(char *name)
 {
-	JsonBehavior *behavior = makeNode(JsonBehavior);
+	if (!pg_strcasecmp(name, "utf8"))
+		return JS_ENC_UTF8;
+	if (!pg_strcasecmp(name, "utf16"))
+		return JS_ENC_UTF16;
+	if (!pg_strcasecmp(name, "utf32"))
+		return JS_ENC_UTF32;
 
-	behavior->btype = btype;
-	behavior->expr = expr;
-	behavior->location = location;
+	ereport(ERROR,
+			errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			errmsg("unrecognized JSON encoding: %s", name));
 
-	return behavior;
+	return JS_ENC_DEFAULT;
 }
 
 /*
@@ -920,41 +913,4 @@ makeJsonIsPredicate(Node *expr, JsonFormat *format, JsonValueType item_type,
 	n->location = location;
 
 	return (Node *) n;
-}
-
-/*
- * makeJsonTablePathSpec -
- *		Make JsonTablePathSpec node from given path string and name (if any)
- */
-JsonTablePathSpec *
-makeJsonTablePathSpec(char *string, char *name, int string_location,
-					  int name_location)
-{
-	JsonTablePathSpec *pathspec = makeNode(JsonTablePathSpec);
-
-	Assert(string != NULL);
-	pathspec->string = makeStringConst(string, string_location);
-	if (name != NULL)
-		pathspec->name = pstrdup(name);
-
-	pathspec->name_location = name_location;
-	pathspec->location = string_location;
-
-	return pathspec;
-}
-
-/*
- * makeJsonTablePath -
- *		Make JsonTablePath node for given path string and name
- */
-JsonTablePath *
-makeJsonTablePath(Const *pathvalue, char *pathname)
-{
-	JsonTablePath *path = makeNode(JsonTablePath);
-
-	Assert(IsA(pathvalue, Const));
-	path->value = pathvalue;
-	path->name = pathname;
-
-	return path;
 }

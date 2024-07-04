@@ -124,7 +124,7 @@
      <listitem>
       <para>
        <literal>user</literal>, <literal>password</literal> and <literal>sslpassword</literal> (specify these
-       in a user mapping instead, or use a service file)
+       in a user mapping, instead, or use a service file)
       </para>
      </listitem>
      <listitem>
@@ -303,7 +303,7 @@ OPTIONS (ADD password_required 'false');
        scans on that server.  This represents the additional overhead of
        data transfer between servers.  You might increase or decrease this
        number to reflect higher or lower network delay to the remote server.
-       The default value is <literal>0.2</literal>.
+       The default value is <literal>0.01</literal>.
       </para>
      </listitem>
     </varlistentry>
@@ -1040,44 +1040,6 @@ postgres=# SELECT postgres_fdw_disconnect_all();
    optimization fence, and placing the problematic function or operator
    outside the sub-<literal>SELECT</literal>.
   </para>
- </sect2>
-
- <sect2 id="postgres-fdw-wait-events">
-  <title>Wait Events</title>
-
-  <para>
-   <filename>postgres_fdw</filename> can report the following wait events
-   under the wait event type <literal>Extension</literal>:
-  </para>
-
-  <variablelist>
-   <varlistentry>
-    <term><literal>PostgresFdwCleanupResult</literal></term>
-    <listitem>
-     <para>
-      Waiting for transaction abort on remote server.
-     </para>
-    </listitem>
-   </varlistentry>
-
-   <varlistentry>
-    <term><literal>PostgresFdwConnect</literal></term>
-    <listitem>
-     <para>
-      Waiting to establish a connection to a remote server.
-     </para>
-    </listitem>
-   </varlistentry>
-
-   <varlistentry>
-    <term><literal>PostgresFdwGetResult</literal></term>
-    <listitem>
-     <para>
-      Waiting to receive the results of a query from a remote server.
-     </para>
-    </listitem>
-   </varlistentry>
-  </variablelist>
  </sect2>
 
  <sect2 id="postgres-fdw-configuration-parameters">

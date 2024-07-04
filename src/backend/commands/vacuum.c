@@ -12,7 +12,7 @@
  * CLUSTER, handled in cluster.c.
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -34,10 +34,11 @@
 #include "access/tableam.h"
 #include "access/transam.h"
 #include "access/xact.h"
-#include "catalog/index.h"
 #include "catalog/namespace.h"
+#include "catalog/index.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_inherits.h"
+#include "catalog/pg_namespace.h"
 #include "commands/cluster.h"
 #include "commands/defrem.h"
 #include "commands/vacuum.h"
@@ -57,6 +58,7 @@
 #include "utils/guc.h"
 #include "utils/guc_hooks.h"
 #include "utils/memutils.h"
+#include "utils/pg_rusage.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
@@ -116,6 +118,7 @@ static bool vacuum_rel(Oid relid, RangeVar *relation, VacuumParams *params,
 static double compute_parallel_delay(void);
 static VacOptValue get_vacoptval_from_boolean(DefElem *def);
 static bool vac_tid_reaped(ItemPointer itemptr, void *state);
+static int	vac_cmp_itemptr(const void *left, const void *right);
 
 /*
  * GUC check function to ensure GUC value specified is within the allowable
@@ -168,9 +171,6 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 
 	/* By default parallel vacuum is enabled */
 	params.nworkers = 0;
-
-	/* Will be set later if we recurse to a TOAST table. */
-	params.toast_parent = InvalidOid;
 
 	/*
 	 * Set this to an invalid value so it is clear whether or not a
@@ -564,7 +564,7 @@ vacuum(List *relations, VacuumParams *params, BufferAccessStrategy bstrategy,
 	else
 	{
 		Assert(params->options & VACOPT_ANALYZE);
-		if (AmAutoVacuumWorkerProcess())
+		if (IsAutoVacuumWorkerProcess())
 			use_own_xacts = true;
 		else if (in_outer_xact)
 			use_own_xacts = false;
@@ -697,29 +697,32 @@ vacuum(List *relations, VacuumParams *params, BufferAccessStrategy bstrategy,
 }
 
 /*
- * Check if the current user has privileges to vacuum or analyze the relation.
- * If not, issue a WARNING log message and return false to let the caller
- * decide what to do with this relation.  This routine is used to decide if a
- * relation can be processed for VACUUM or ANALYZE.
+ * Check if a given relation can be safely vacuumed or analyzed.  If the
+ * user is not the relation owner, issue a WARNING log message and return
+ * false to let the caller decide what to do with this relation.  This
+ * routine is used to decide if a relation can be processed for VACUUM or
+ * ANALYZE.
  */
 bool
-vacuum_is_permitted_for_relation(Oid relid, Form_pg_class reltuple,
-								 bits32 options)
+vacuum_is_relation_owner(Oid relid, Form_pg_class reltuple, bits32 options)
 {
 	char	   *relname;
 
 	Assert((options & (VACOPT_VACUUM | VACOPT_ANALYZE)) != 0);
 
-	/*----------
-	 * A role has privileges to vacuum or analyze the relation if any of the
-	 * following are true:
-	 *   - the role owns the current database and the relation is not shared
-	 *   - the role has the MAINTAIN privilege on the relation
-	 *----------
+	/*
+	 * Check permissions.
+	 *
+	 * We allow the user to vacuum or analyze a table if he is superuser, the
+	 * table owner, or the database owner (but in the latter case, only if
+	 * it's not a shared relation).  object_ownercheck includes the superuser
+	 * case.
+	 *
+	 * Note we choose to treat permissions failure as a WARNING and keep
+	 * trying to vacuum or analyze the rest of the DB --- is this appropriate?
 	 */
-	if ((object_ownercheck(DatabaseRelationId, MyDatabaseId, GetUserId()) &&
-		 !reltuple->relisshared) ||
-		pg_class_aclcheck(relid, GetUserId(), ACL_MAINTAIN) == ACLCHECK_OK)
+	if (object_ownercheck(RelationRelationId, relid, GetUserId()) ||
+		(object_ownercheck(DatabaseRelationId, MyDatabaseId, GetUserId()) && !reltuple->relisshared))
 		return true;
 
 	relname = NameStr(reltuple->relname);
@@ -806,7 +809,7 @@ vacuum_open_relation(Oid relid, RangeVar *relation, bits32 options,
 	 * statements in the permission checks; otherwise, only log if the caller
 	 * so requested.
 	 */
-	if (!AmAutoVacuumWorkerProcess())
+	if (!IsAutoVacuumWorkerProcess())
 		elevel = WARNING;
 	else if (verbose)
 		elevel = LOG;
@@ -893,7 +896,7 @@ expand_vacuum_rel(VacuumRelation *vrel, MemoryContext vac_context,
 		 * Since autovacuum workers supply OIDs when calling vacuum(), no
 		 * autovacuum worker should reach this code.
 		 */
-		Assert(!AmAutoVacuumWorkerProcess());
+		Assert(!IsAutoVacuumWorkerProcess());
 
 		/*
 		 * We transiently take AccessShareLock to protect the syscache lookup
@@ -935,10 +938,10 @@ expand_vacuum_rel(VacuumRelation *vrel, MemoryContext vac_context,
 		classForm = (Form_pg_class) GETSTRUCT(tuple);
 
 		/*
-		 * Make a returnable VacuumRelation for this rel if the user has the
-		 * required privileges.
+		 * Make a returnable VacuumRelation for this rel if user is a proper
+		 * owner.
 		 */
-		if (vacuum_is_permitted_for_relation(relid, classForm, options))
+		if (vacuum_is_relation_owner(relid, classForm, options))
 		{
 			oldcontext = MemoryContextSwitchTo(vac_context);
 			vacrels = lappend(vacrels, makeVacuumRelation(vrel->relation,
@@ -1035,7 +1038,7 @@ get_all_vacuum_rels(MemoryContext vac_context, int options)
 			continue;
 
 		/* check permissions of relation */
-		if (!vacuum_is_permitted_for_relation(relid, classForm, options))
+		if (!vacuum_is_relation_owner(relid, classForm, options))
 			continue;
 
 		/*
@@ -1106,6 +1109,25 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	 * any time, and that each vacuum is always an independent transaction.
 	 */
 	cutoffs->OldestXmin = GetOldestNonRemovableTransactionId(rel);
+
+	if (OldSnapshotThresholdActive())
+	{
+		TransactionId limit_xmin;
+		TimestampTz limit_ts;
+
+		if (TransactionIdLimitedForOldSnapshots(cutoffs->OldestXmin, rel,
+												&limit_xmin, &limit_ts))
+		{
+			/*
+			 * TODO: We should only set the threshold if we are pruning on the
+			 * basis of the increased limits.  Not as crucial here as it is
+			 * for opportunistic pruning (which often happens at a much higher
+			 * frequency), but would still be a significant improvement.
+			 */
+			SetOldSnapshotThresholdTimestamp(limit_ts, limit_xmin);
+			cutoffs->OldestXmin = limit_xmin;
+		}
+	}
 
 	Assert(TransactionIdIsNormal(cutoffs->OldestXmin));
 
@@ -1200,7 +1222,7 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	aggressiveXIDCutoff = nextXID - freeze_table_age;
 	if (!TransactionIdIsNormal(aggressiveXIDCutoff))
 		aggressiveXIDCutoff = FirstNormalTransactionId;
-	if (TransactionIdPrecedesOrEquals(cutoffs->relfrozenxid,
+	if (TransactionIdPrecedesOrEquals(rel->rd_rel->relfrozenxid,
 									  aggressiveXIDCutoff))
 		return true;
 
@@ -1221,7 +1243,7 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	aggressiveMXIDCutoff = nextMXID - multixact_freeze_table_age;
 	if (aggressiveMXIDCutoff < FirstMultiXactId)
 		aggressiveMXIDCutoff = FirstMultiXactId;
-	if (MultiXactIdPrecedesOrEquals(cutoffs->relminmxid,
+	if (MultiXactIdPrecedesOrEquals(rel->rd_rel->relminmxid,
 									aggressiveMXIDCutoff))
 		return true;
 
@@ -1955,7 +1977,6 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams *params,
 	LOCKMODE	lmode;
 	Relation	rel;
 	LockRelId	lockrelid;
-	Oid			priv_relid;
 	Oid			toast_relid;
 	Oid			save_userid;
 	int			save_sec_context;
@@ -2032,25 +2053,16 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams *params,
 	}
 
 	/*
-	 * When recursing to a TOAST table, check privileges on the parent.  NB:
-	 * This is only safe to do because we hold a session lock on the main
-	 * relation that prevents concurrent deletion.
-	 */
-	if (OidIsValid(params->toast_parent))
-		priv_relid = params->toast_parent;
-	else
-		priv_relid = RelationGetRelid(rel);
-
-	/*
-	 * Check if relation needs to be skipped based on privileges.  This check
+	 * Check if relation needs to be skipped based on ownership.  This check
 	 * happens also when building the relation list to vacuum for a manual
 	 * operation, and needs to be done additionally here as VACUUM could
-	 * happen across multiple transactions where privileges could have changed
-	 * in-between.  Make sure to only generate logs for VACUUM in this case.
+	 * happen across multiple transactions where relation ownership could have
+	 * changed in-between.  Make sure to only generate logs for VACUUM in this
+	 * case.
 	 */
-	if (!vacuum_is_permitted_for_relation(priv_relid,
-										  rel->rd_rel,
-										  params->options & ~VACOPT_ANALYZE))
+	if (!vacuum_is_relation_owner(RelationGetRelid(rel),
+								  rel->rd_rel,
+								  params->options & VACOPT_VACUUM))
 	{
 		relation_close(rel, lmode);
 		PopActiveSnapshot();
@@ -2179,7 +2191,6 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams *params,
 	SetUserIdAndSecContext(rel->rd_rel->relowner,
 						   save_sec_context | SECURITY_RESTRICTED_OPERATION);
 	save_nestlevel = NewGUCNestLevel();
-	RestrictSearchPath();
 
 	/*
 	 * If PROCESS_MAIN is set (the default), it's time to vacuum the main
@@ -2237,15 +2248,9 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams *params,
 	{
 		VacuumParams toast_vacuum_params;
 
-		/*
-		 * Force VACOPT_PROCESS_MAIN so vacuum_rel() processes it.  Likewise,
-		 * set toast_parent so that the privilege checks are done on the main
-		 * relation.  NB: This is only safe to do because we hold a session
-		 * lock on the main relation that prevents concurrent deletion.
-		 */
+		/* force VACOPT_PROCESS_MAIN so vacuum_rel() processes it */
 		memcpy(&toast_vacuum_params, params, sizeof(VacuumParams));
 		toast_vacuum_params.options |= VACOPT_PROCESS_MAIN;
-		toast_vacuum_params.toast_parent = relid;
 
 		vacuum_rel(toast_relid, NULL, &toast_vacuum_params, bstrategy);
 	}
@@ -2354,7 +2359,7 @@ vacuum_delay_point(void)
 	 * [autovacuum_]vacuum_cost_delay to take effect while a table is being
 	 * vacuumed or analyzed.
 	 */
-	if (ConfigReloadPending && AmAutoVacuumWorkerProcess())
+	if (ConfigReloadPending && IsAutoVacuumWorkerProcess())
 	{
 		ConfigReloadPending = false;
 		ProcessConfigFile(PGC_SIGHUP);
@@ -2492,16 +2497,16 @@ get_vacoptval_from_boolean(DefElem *def)
  */
 IndexBulkDeleteResult *
 vac_bulkdel_one_index(IndexVacuumInfo *ivinfo, IndexBulkDeleteResult *istat,
-					  TidStore *dead_items, VacDeadItemsInfo *dead_items_info)
+					  VacDeadItems *dead_items)
 {
 	/* Do bulk deletion */
 	istat = index_bulk_delete(ivinfo, istat, vac_tid_reaped,
 							  (void *) dead_items);
 
 	ereport(ivinfo->message_level,
-			(errmsg("scanned index \"%s\" to remove %lld row versions",
+			(errmsg("scanned index \"%s\" to remove %d row versions",
 					RelationGetRelationName(ivinfo->index),
-					(long long) dead_items_info->num_items)));
+					dead_items->num_items)));
 
 	return istat;
 }
@@ -2533,14 +2538,81 @@ vac_cleanup_one_index(IndexVacuumInfo *ivinfo, IndexBulkDeleteResult *istat)
 }
 
 /*
+ * Returns the total required space for VACUUM's dead_items array given a
+ * max_items value.
+ */
+Size
+vac_max_items_to_alloc_size(int max_items)
+{
+	Assert(max_items <= MAXDEADITEMS(MaxAllocSize));
+
+	return offsetof(VacDeadItems, items) + sizeof(ItemPointerData) * max_items;
+}
+
+/*
  *	vac_tid_reaped() -- is a particular tid deletable?
  *
  *		This has the right signature to be an IndexBulkDeleteCallback.
+ *
+ *		Assumes dead_items array is sorted (in ascending TID order).
  */
 static bool
 vac_tid_reaped(ItemPointer itemptr, void *state)
 {
-	TidStore   *dead_items = (TidStore *) state;
+	VacDeadItems *dead_items = (VacDeadItems *) state;
+	int64		litem,
+				ritem,
+				item;
+	ItemPointer res;
 
-	return TidStoreIsMember(dead_items, itemptr);
+	litem = itemptr_encode(&dead_items->items[0]);
+	ritem = itemptr_encode(&dead_items->items[dead_items->num_items - 1]);
+	item = itemptr_encode(itemptr);
+
+	/*
+	 * Doing a simple bound check before bsearch() is useful to avoid the
+	 * extra cost of bsearch(), especially if dead items on the heap are
+	 * concentrated in a certain range.  Since this function is called for
+	 * every index tuple, it pays to be really fast.
+	 */
+	if (item < litem || item > ritem)
+		return false;
+
+	res = (ItemPointer) bsearch(itemptr,
+								dead_items->items,
+								dead_items->num_items,
+								sizeof(ItemPointerData),
+								vac_cmp_itemptr);
+
+	return (res != NULL);
+}
+
+/*
+ * Comparator routines for use with qsort() and bsearch().
+ */
+static int
+vac_cmp_itemptr(const void *left, const void *right)
+{
+	BlockNumber lblk,
+				rblk;
+	OffsetNumber loff,
+				roff;
+
+	lblk = ItemPointerGetBlockNumber((ItemPointer) left);
+	rblk = ItemPointerGetBlockNumber((ItemPointer) right);
+
+	if (lblk < rblk)
+		return -1;
+	if (lblk > rblk)
+		return 1;
+
+	loff = ItemPointerGetOffsetNumber((ItemPointer) left);
+	roff = ItemPointerGetOffsetNumber((ItemPointer) right);
+
+	if (loff < roff)
+		return -1;
+	if (loff > roff)
+		return 1;
+
+	return 0;
 }

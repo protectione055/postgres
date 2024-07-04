@@ -1,9 +1,9 @@
 
-# Copyright (c) 2021-2024, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 # Test that logical replication respects permissions
 use strict;
-use warnings FATAL => 'all';
+use warnings;
 use PostgreSQL::Test::Cluster;
 use Test::More;
 
@@ -207,7 +207,10 @@ GRANT regress_alice TO regress_admin WITH INHERIT FALSE, SET TRUE;
 # the above grant doesn't help.
 publish_insert("alice.unpartitioned", 14);
 expect_failure(
-	"alice.unpartitioned", 3, 7, 13,
+	"alice.unpartitioned",
+	3,
+	7,
+	13,
 	qr/ERROR: ( [A-Z0-9]+:)? permission denied for table unpartitioned/msi,
 	"with no privileges cannot replicate");
 

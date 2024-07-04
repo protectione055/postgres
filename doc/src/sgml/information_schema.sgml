@@ -639,8 +639,8 @@
        <structfield>dtd_identifier</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       An identifier of the data type descriptor of the attribute, unique
-       among the data type descriptors pertaining to the composite type.  This
+       An identifier of the data type descriptor of the column, unique
+       among the data type descriptors pertaining to the table.  This
        is mainly useful for joining with other instances of such
        identifiers.  (The specific format of the identifier is not
        defined and not guaranteed to remain the same in future
@@ -915,13 +915,6 @@
    constraints, either defined on a table or on a domain, that are
    owned by a currently enabled role.  (The owner of the table or
    domain is the owner of the constraint.)
-  </para>
-
-  <para>
-   The SQL standard considers not-null constraints to be check constraints
-   with a <literal>CHECK (<replaceable>column_name</replaceable> IS NOT
-   NULL)</literal> expression.  So not-null constraints are also included here
-   and don't have a separate view.
   </para>
 
   <table>
@@ -2123,9 +2116,7 @@
    columns in the current database that are used by some constraint.
    Only those columns are shown that are contained in a table owned by
    a currently enabled role.  For a check constraint, this view
-   identifies the columns that are used in the check expression.  For a
-   not-null constraint, this view identifies the column that the constraint is
-   defined on.  For
+   identifies the columns that are used in the check expression.  For
    a foreign key constraint, this view identifies the columns that the
    foreign key references.  For a unique or primary key constraint,
    this view identifies the constrained columns.
@@ -3140,6 +3131,15 @@ ORDER BY c.ordinal_position;
       </para>
       <para>
        Always null, since this information is not applied to array element data types in <productname>PostgreSQL</productname>
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>domain_default</structfield> <type>character_data</type>
+      </para>
+      <para>
+       Not yet implemented
       </para></entry>
      </row>
 
@@ -6867,7 +6867,7 @@ ORDER BY c.ordinal_position;
        <structfield>constraint_type</structfield> <type>character_data</type>
       </para>
       <para>
-       Type of the constraint: <literal>CHECK</literal> (includes not-null constraints),
+       Type of the constraint: <literal>CHECK</literal>,
        <literal>FOREIGN KEY</literal>, <literal>PRIMARY KEY</literal>,
        or <literal>UNIQUE</literal>
       </para></entry>

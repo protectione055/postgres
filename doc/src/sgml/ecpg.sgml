@@ -1500,9 +1500,9 @@ EXEC SQL TYPE serial_t IS long;
      </para>
 
      <para>
-      Any word you declare as a <literal>typedef</literal> cannot be used as
-      an SQL keyword in <literal>EXEC SQL</literal> commands later in the same
-      program. For example, this won't work:
+      Any word you declare as a typedef cannot be used as an SQL keyword
+      in <literal>EXEC SQL</literal> commands later in the same program.
+      For example, this won't work:
 <programlisting>
 EXEC SQL BEGIN DECLARE SECTION;
     typedef int start;
@@ -2390,10 +2390,9 @@ int PGTYPESnumeric_to_long(numeric *nv, long *lp);
        The function converts the numeric value from the variable that
        <literal>nv</literal> points to into the long integer variable that
        <literal>lp</literal> points to. It returns 0 on success and -1 if an error
-       occurs, including overflow and underflow. On overflow, the global variable
+       occurs, including overflow. On overflow, the global variable
        <literal>errno</literal> will be set to <literal>PGTYPES_NUM_OVERFLOW</literal>
-       and on underflow <literal>errno</literal> will be set to
-       <literal>PGTYPES_NUM_UNDERFLOW</literal>.
+       additionally.
       </para>
      </listitem>
     </varlistentry>
@@ -4764,7 +4763,6 @@ datdba = 10 (type: 1)
 encoding = 0 (type: 5)
 datistemplate = t (type: 1)
 datallowconn = t (type: 1)
-dathasloginevt = f (type: 1)
 datconnlimit = -1 (type: 5)
 datfrozenxid = 379 (type: 1)
 dattablespace = 1663 (type: 1)
@@ -4789,7 +4787,6 @@ datdba = 10 (type: 1)
 encoding = 0 (type: 5)
 datistemplate = f (type: 1)
 datallowconn = t (type: 1)
-dathasloginevt = f (type: 1)
 datconnlimit = -1 (type: 5)
 datfrozenxid = 379 (type: 1)
 dattablespace = 1663 (type: 1)

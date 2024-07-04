@@ -23,7 +23,7 @@
  * The Windows implementation uses Windows events that are inherited by all
  * postmaster child processes. There's no need for the self-pipe trick there.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -60,8 +60,8 @@
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/pmsignal.h"
+#include "storage/shmem.h"
 #include "utils/memutils.h"
-#include "utils/resowner.h"
 
 /*
  * Select the fd readiness primitive to use. Normally the "most modern"
@@ -86,12 +86,14 @@
 
 /*
  * By default, we use a self-pipe with poll() and a signalfd with epoll(), if
- * available.  For testing the choice can also be manually specified.
+ * available.  We avoid signalfd on illumos for now based on problem reports.
+ * For testing the choice can also be manually specified.
  */
 #if defined(WAIT_USE_POLL) || defined(WAIT_USE_EPOLL)
 #if defined(WAIT_USE_SELF_PIPE) || defined(WAIT_USE_SIGNALFD)
 /* don't overwrite manual choice */
-#elif defined(WAIT_USE_EPOLL) && defined(HAVE_SYS_SIGNALFD_H)
+#elif defined(WAIT_USE_EPOLL) && defined(HAVE_SYS_SIGNALFD_H) && \
+	!defined(__illumos__)
 #define WAIT_USE_SIGNALFD
 #else
 #define WAIT_USE_SELF_PIPE
@@ -101,8 +103,6 @@
 /* typedef in latch.h */
 struct WaitEventSet
 {
-	ResourceOwner owner;
-
 	int			nevents;		/* number of registered events */
 	int			nevents_space;	/* maximum number of events in this set */
 
@@ -196,31 +196,6 @@ static void WaitEventAdjustWin32(WaitEventSet *set, WaitEvent *event);
 
 static inline int WaitEventSetWaitBlock(WaitEventSet *set, int cur_timeout,
 										WaitEvent *occurred_events, int nevents);
-
-/* ResourceOwner support to hold WaitEventSets */
-static void ResOwnerReleaseWaitEventSet(Datum res);
-
-static const ResourceOwnerDesc wait_event_set_resowner_desc =
-{
-	.name = "WaitEventSet",
-	.release_phase = RESOURCE_RELEASE_AFTER_LOCKS,
-	.release_priority = RELEASE_PRIO_WAITEVENTSETS,
-	.ReleaseResource = ResOwnerReleaseWaitEventSet,
-	.DebugPrint = NULL
-};
-
-/* Convenience wrappers over ResourceOwnerRemember/Forget */
-static inline void
-ResourceOwnerRememberWaitEventSet(ResourceOwner owner, WaitEventSet *set)
-{
-	ResourceOwnerRemember(owner, PointerGetDatum(set), &wait_event_set_resowner_desc);
-}
-static inline void
-ResourceOwnerForgetWaitEventSet(ResourceOwner owner, WaitEventSet *set)
-{
-	ResourceOwnerForget(owner, PointerGetDatum(set), &wait_event_set_resowner_desc);
-}
-
 
 /*
  * Initialize the process-local latch infrastructure.
@@ -350,7 +325,7 @@ InitializeLatchWaitSet(void)
 	Assert(LatchWaitSet == NULL);
 
 	/* Set up the WaitEventSet used by WaitLatch(). */
-	LatchWaitSet = CreateWaitEventSet(NULL, 2);
+	LatchWaitSet = CreateWaitEventSet(TopMemoryContext, 2);
 	latch_pos = AddWaitEventToSet(LatchWaitSet, WL_LATCH_SET, PGINVALID_SOCKET,
 								  MyLatch, NULL);
 	if (IsUnderPostmaster)
@@ -568,50 +543,56 @@ WaitLatchOrSocket(Latch *latch, int wakeEvents, pgsocket sock,
 	int			ret = 0;
 	int			rc;
 	WaitEvent	event;
-	WaitEventSet *set = CreateWaitEventSet(CurrentResourceOwner, 3);
+	WaitEventSet *set = CreateWaitEventSet(CurrentMemoryContext, 3);
 
-	if (wakeEvents & WL_TIMEOUT)
-		Assert(timeout >= 0);
-	else
-		timeout = -1;
-
-	if (wakeEvents & WL_LATCH_SET)
-		AddWaitEventToSet(set, WL_LATCH_SET, PGINVALID_SOCKET,
-						  latch, NULL);
-
-	/* Postmaster-managed callers must handle postmaster death somehow. */
-	Assert(!IsUnderPostmaster ||
-		   (wakeEvents & WL_EXIT_ON_PM_DEATH) ||
-		   (wakeEvents & WL_POSTMASTER_DEATH));
-
-	if ((wakeEvents & WL_POSTMASTER_DEATH) && IsUnderPostmaster)
-		AddWaitEventToSet(set, WL_POSTMASTER_DEATH, PGINVALID_SOCKET,
-						  NULL, NULL);
-
-	if ((wakeEvents & WL_EXIT_ON_PM_DEATH) && IsUnderPostmaster)
-		AddWaitEventToSet(set, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
-						  NULL, NULL);
-
-	if (wakeEvents & WL_SOCKET_MASK)
+	PG_TRY();
 	{
-		int			ev;
+		if (wakeEvents & WL_TIMEOUT)
+			Assert(timeout >= 0);
+		else
+			timeout = -1;
 
-		ev = wakeEvents & WL_SOCKET_MASK;
-		AddWaitEventToSet(set, ev, sock, NULL, NULL);
+		if (wakeEvents & WL_LATCH_SET)
+			AddWaitEventToSet(set, WL_LATCH_SET, PGINVALID_SOCKET,
+							  latch, NULL);
+
+		/* Postmaster-managed callers must handle postmaster death somehow. */
+		Assert(!IsUnderPostmaster ||
+			   (wakeEvents & WL_EXIT_ON_PM_DEATH) ||
+			   (wakeEvents & WL_POSTMASTER_DEATH));
+
+		if ((wakeEvents & WL_POSTMASTER_DEATH) && IsUnderPostmaster)
+			AddWaitEventToSet(set, WL_POSTMASTER_DEATH, PGINVALID_SOCKET,
+							  NULL, NULL);
+
+		if ((wakeEvents & WL_EXIT_ON_PM_DEATH) && IsUnderPostmaster)
+			AddWaitEventToSet(set, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
+							  NULL, NULL);
+
+		if (wakeEvents & WL_SOCKET_MASK)
+		{
+			int			ev;
+
+			ev = wakeEvents & WL_SOCKET_MASK;
+			AddWaitEventToSet(set, ev, sock, NULL, NULL);
+		}
+
+		rc = WaitEventSetWait(set, timeout, &event, 1, wait_event_info);
+
+		if (rc == 0)
+			ret |= WL_TIMEOUT;
+		else
+		{
+			ret |= event.events & (WL_LATCH_SET |
+								   WL_POSTMASTER_DEATH |
+								   WL_SOCKET_MASK);
+		}
 	}
-
-	rc = WaitEventSetWait(set, timeout, &event, 1, wait_event_info);
-
-	if (rc == 0)
-		ret |= WL_TIMEOUT;
-	else
+	PG_FINALLY();
 	{
-		ret |= event.events & (WL_LATCH_SET |
-							   WL_POSTMASTER_DEATH |
-							   WL_SOCKET_MASK);
+		FreeWaitEventSet(set);
 	}
-
-	FreeWaitEventSet(set);
+	PG_END_TRY();
 
 	return ret;
 }
@@ -743,12 +724,9 @@ ResetLatch(Latch *latch)
  *
  * These events can then be efficiently waited upon together, using
  * WaitEventSetWait().
- *
- * The WaitEventSet is tracked by the given 'resowner'.  Use NULL for session
- * lifetime.
  */
 WaitEventSet *
-CreateWaitEventSet(ResourceOwner resowner, int nevents)
+CreateWaitEventSet(MemoryContext context, int nevents)
 {
 	WaitEventSet *set;
 	char	   *data;
@@ -774,10 +752,7 @@ CreateWaitEventSet(ResourceOwner resowner, int nevents)
 	sz += MAXALIGN(sizeof(HANDLE) * (nevents + 1));
 #endif
 
-	if (resowner != NULL)
-		ResourceOwnerEnlarge(resowner);
-
-	data = (char *) MemoryContextAllocZero(TopMemoryContext, sz);
+	data = (char *) MemoryContextAllocZero(context, sz);
 
 	set = (WaitEventSet *) data;
 	data += MAXALIGN(sizeof(WaitEventSet));
@@ -802,12 +777,6 @@ CreateWaitEventSet(ResourceOwner resowner, int nevents)
 	set->latch = NULL;
 	set->nevents_space = nevents;
 	set->exit_on_postmaster_death = false;
-
-	if (resowner != NULL)
-	{
-		ResourceOwnerRememberWaitEventSet(resowner, set);
-		set->owner = resowner;
-	}
 
 #if defined(WAIT_USE_EPOLL)
 	if (!AcquireExternalFD())
@@ -873,12 +842,6 @@ CreateWaitEventSet(ResourceOwner resowner, int nevents)
 void
 FreeWaitEventSet(WaitEventSet *set)
 {
-	if (set->owner)
-	{
-		ResourceOwnerForgetWaitEventSet(set->owner, set);
-		set->owner = NULL;
-	}
-
 #if defined(WAIT_USE_EPOLL)
 	close(set->epoll_fd);
 	ReleaseExternalFD();
@@ -886,7 +849,9 @@ FreeWaitEventSet(WaitEventSet *set)
 	close(set->kqueue_fd);
 	ReleaseExternalFD();
 #elif defined(WAIT_USE_WIN32)
-	for (WaitEvent *cur_event = set->events;
+	WaitEvent  *cur_event;
+
+	for (cur_event = set->events;
 		 cur_event < (set->events + set->nevents);
 		 cur_event++)
 	{
@@ -1974,11 +1939,14 @@ WaitEventSetWaitBlock(WaitEventSet *set, int cur_timeout,
 #elif defined(WAIT_USE_WIN32)
 
 /*
- * Wait using Windows' WaitForMultipleObjects().  Each call only "consumes" one
- * event, so we keep calling until we've filled up our output buffer to match
- * the behavior of the other implementations.
+ * Wait using Windows' WaitForMultipleObjects().
  *
- * https://blogs.msdn.microsoft.com/oldnewthing/20150409-00/?p=44273
+ * Unfortunately this will only ever return a single readiness notification at
+ * a time.  Note that while the official documentation for
+ * WaitForMultipleObjects is ambiguous about multiple events being "consumed"
+ * with a single bWaitAll = FALSE call,
+ * https://blogs.msdn.microsoft.com/oldnewthing/20150409-00/?p=44273 confirms
+ * that only one event is "consumed".
  */
 static inline int
 WaitEventSetWaitBlock(WaitEventSet *set, int cur_timeout,
@@ -2063,145 +2031,106 @@ WaitEventSetWaitBlock(WaitEventSet *set, int cur_timeout,
 	 */
 	cur_event = (WaitEvent *) &set->events[rc - WAIT_OBJECT_0 - 1];
 
-	for (;;)
+	occurred_events->pos = cur_event->pos;
+	occurred_events->user_data = cur_event->user_data;
+	occurred_events->events = 0;
+
+	if (cur_event->events == WL_LATCH_SET)
 	{
-		int			next_pos;
-		int			count;
-
-		occurred_events->pos = cur_event->pos;
-		occurred_events->user_data = cur_event->user_data;
-		occurred_events->events = 0;
-
-		if (cur_event->events == WL_LATCH_SET)
-		{
-			/*
-			 * We cannot use set->latch->event to reset the fired event if we
-			 * aren't waiting on this latch now.
-			 */
-			if (!ResetEvent(set->handles[cur_event->pos + 1]))
-				elog(ERROR, "ResetEvent failed: error code %lu", GetLastError());
-
-			if (set->latch && set->latch->is_set)
-			{
-				occurred_events->fd = PGINVALID_SOCKET;
-				occurred_events->events = WL_LATCH_SET;
-				occurred_events++;
-				returned_events++;
-			}
-		}
-		else if (cur_event->events == WL_POSTMASTER_DEATH)
-		{
-			/*
-			 * Postmaster apparently died.  Since the consequences of falsely
-			 * returning WL_POSTMASTER_DEATH could be pretty unpleasant, we
-			 * take the trouble to positively verify this with
-			 * PostmasterIsAlive(), even though there is no known reason to
-			 * think that the event could be falsely set on Windows.
-			 */
-			if (!PostmasterIsAliveInternal())
-			{
-				if (set->exit_on_postmaster_death)
-					proc_exit(1);
-				occurred_events->fd = PGINVALID_SOCKET;
-				occurred_events->events = WL_POSTMASTER_DEATH;
-				occurred_events++;
-				returned_events++;
-			}
-		}
-		else if (cur_event->events & WL_SOCKET_MASK)
-		{
-			WSANETWORKEVENTS resEvents;
-			HANDLE		handle = set->handles[cur_event->pos + 1];
-
-			Assert(cur_event->fd);
-
-			occurred_events->fd = cur_event->fd;
-
-			ZeroMemory(&resEvents, sizeof(resEvents));
-			if (WSAEnumNetworkEvents(cur_event->fd, handle, &resEvents) != 0)
-				elog(ERROR, "failed to enumerate network events: error code %d",
-					 WSAGetLastError());
-			if ((cur_event->events & WL_SOCKET_READABLE) &&
-				(resEvents.lNetworkEvents & FD_READ))
-			{
-				/* data available in socket */
-				occurred_events->events |= WL_SOCKET_READABLE;
-
-				/*------
-				 * WaitForMultipleObjects doesn't guarantee that a read event
-				 * will be returned if the latch is set at the same time.  Even
-				 * if it did, the caller might drop that event expecting it to
-				 * reoccur on next call.  So, we must force the event to be
-				 * reset if this WaitEventSet is used again in order to avoid
-				 * an indefinite hang.
-				 *
-				 * Refer
-				 * https://msdn.microsoft.com/en-us/library/windows/desktop/ms741576(v=vs.85).aspx
-				 * for the behavior of socket events.
-				 *------
-				 */
-				cur_event->reset = true;
-			}
-			if ((cur_event->events & WL_SOCKET_WRITEABLE) &&
-				(resEvents.lNetworkEvents & FD_WRITE))
-			{
-				/* writeable */
-				occurred_events->events |= WL_SOCKET_WRITEABLE;
-			}
-			if ((cur_event->events & WL_SOCKET_CONNECTED) &&
-				(resEvents.lNetworkEvents & FD_CONNECT))
-			{
-				/* connected */
-				occurred_events->events |= WL_SOCKET_CONNECTED;
-			}
-			if ((cur_event->events & WL_SOCKET_ACCEPT) &&
-				(resEvents.lNetworkEvents & FD_ACCEPT))
-			{
-				/* incoming connection could be accepted */
-				occurred_events->events |= WL_SOCKET_ACCEPT;
-			}
-			if (resEvents.lNetworkEvents & FD_CLOSE)
-			{
-				/* EOF/error, so signal all caller-requested socket flags */
-				occurred_events->events |= (cur_event->events & WL_SOCKET_MASK);
-			}
-
-			if (occurred_events->events != 0)
-			{
-				occurred_events++;
-				returned_events++;
-			}
-		}
-
-		/* Is the output buffer full? */
-		if (returned_events == nevents)
-			break;
-
-		/* Have we run out of possible events? */
-		next_pos = cur_event->pos + 1;
-		if (next_pos == set->nevents)
-			break;
-
 		/*
-		 * Poll the rest of the event handles in the array starting at
-		 * next_pos being careful to skip over the initial signal handle too.
-		 * This time we use a zero timeout.
+		 * We cannot use set->latch->event to reset the fired event if we
+		 * aren't waiting on this latch now.
 		 */
-		count = set->nevents - next_pos;
-		rc = WaitForMultipleObjects(count,
-									set->handles + 1 + next_pos,
-									false,
-									0);
+		if (!ResetEvent(set->handles[cur_event->pos + 1]))
+			elog(ERROR, "ResetEvent failed: error code %lu", GetLastError());
 
+		if (set->latch && set->latch->is_set)
+		{
+			occurred_events->fd = PGINVALID_SOCKET;
+			occurred_events->events = WL_LATCH_SET;
+			occurred_events++;
+			returned_events++;
+		}
+	}
+	else if (cur_event->events == WL_POSTMASTER_DEATH)
+	{
 		/*
-		 * We don't distinguish between errors and WAIT_TIMEOUT here because
-		 * we already have events to report.
+		 * Postmaster apparently died.  Since the consequences of falsely
+		 * returning WL_POSTMASTER_DEATH could be pretty unpleasant, we take
+		 * the trouble to positively verify this with PostmasterIsAlive(),
+		 * even though there is no known reason to think that the event could
+		 * be falsely set on Windows.
 		 */
-		if (rc < WAIT_OBJECT_0 || rc >= WAIT_OBJECT_0 + count)
-			break;
+		if (!PostmasterIsAliveInternal())
+		{
+			if (set->exit_on_postmaster_death)
+				proc_exit(1);
+			occurred_events->fd = PGINVALID_SOCKET;
+			occurred_events->events = WL_POSTMASTER_DEATH;
+			occurred_events++;
+			returned_events++;
+		}
+	}
+	else if (cur_event->events & WL_SOCKET_MASK)
+	{
+		WSANETWORKEVENTS resEvents;
+		HANDLE		handle = set->handles[cur_event->pos + 1];
 
-		/* We have another event to decode. */
-		cur_event = &set->events[next_pos + (rc - WAIT_OBJECT_0)];
+		Assert(cur_event->fd);
+
+		occurred_events->fd = cur_event->fd;
+
+		ZeroMemory(&resEvents, sizeof(resEvents));
+		if (WSAEnumNetworkEvents(cur_event->fd, handle, &resEvents) != 0)
+			elog(ERROR, "failed to enumerate network events: error code %d",
+				 WSAGetLastError());
+		if ((cur_event->events & WL_SOCKET_READABLE) &&
+			(resEvents.lNetworkEvents & FD_READ))
+		{
+			/* data available in socket */
+			occurred_events->events |= WL_SOCKET_READABLE;
+
+			/*------
+			 * WaitForMultipleObjects doesn't guarantee that a read event will
+			 * be returned if the latch is set at the same time.  Even if it
+			 * did, the caller might drop that event expecting it to reoccur
+			 * on next call.  So, we must force the event to be reset if this
+			 * WaitEventSet is used again in order to avoid an indefinite
+			 * hang.  Refer https://msdn.microsoft.com/en-us/library/windows/desktop/ms741576(v=vs.85).aspx
+			 * for the behavior of socket events.
+			 *------
+			 */
+			cur_event->reset = true;
+		}
+		if ((cur_event->events & WL_SOCKET_WRITEABLE) &&
+			(resEvents.lNetworkEvents & FD_WRITE))
+		{
+			/* writeable */
+			occurred_events->events |= WL_SOCKET_WRITEABLE;
+		}
+		if ((cur_event->events & WL_SOCKET_CONNECTED) &&
+			(resEvents.lNetworkEvents & FD_CONNECT))
+		{
+			/* connected */
+			occurred_events->events |= WL_SOCKET_CONNECTED;
+		}
+		if ((cur_event->events & WL_SOCKET_ACCEPT) &&
+			(resEvents.lNetworkEvents & FD_ACCEPT))
+		{
+			/* incoming connection could be accepted */
+			occurred_events->events |= WL_SOCKET_ACCEPT;
+		}
+		if (resEvents.lNetworkEvents & FD_CLOSE)
+		{
+			/* EOF/error, so signal all caller-requested socket flags */
+			occurred_events->events |= (cur_event->events & WL_SOCKET_MASK);
+		}
+
+		if (occurred_events->events != 0)
+		{
+			occurred_events++;
+			returned_events++;
+		}
 	}
 
 	return returned_events;
@@ -2242,8 +2171,12 @@ GetNumRegisteredWaitEvents(WaitEventSet *set)
 static void
 latch_sigurg_handler(SIGNAL_ARGS)
 {
+	int			save_errno = errno;
+
 	if (waiting)
 		sendSelfPipeByte();
+
+	errno = save_errno;
 }
 
 /* Send one byte to the self-pipe, to wake up WaitLatch */
@@ -2339,13 +2272,3 @@ drain(void)
 }
 
 #endif
-
-static void
-ResOwnerReleaseWaitEventSet(Datum res)
-{
-	WaitEventSet *set = (WaitEventSet *) DatumGetPointer(res);
-
-	Assert(set->owner != NULL);
-	set->owner = NULL;
-	FreeWaitEventSet(set);
-}

@@ -3354,7 +3354,7 @@ declare v int := 0;
 begin
   return 10 / v;
 end;
-$$ language plpgsql parallel safe;
+$$ language plpgsql;
 
 create or replace function raise_test() returns void as $$
 begin
@@ -3415,28 +3415,8 @@ $$ language plpgsql;
 
 select stacked_diagnostics_test();
 
-drop function stacked_diagnostics_test();
-
--- Test that an error recovery subtransaction is parallel safe
-
-create function error_trap_test() returns text as $$
-begin
-  perform zero_divide();
-  return 'no error detected!';
-exception when division_by_zero then
-  return 'division_by_zero detected';
-end;
-$$ language plpgsql parallel safe;
-
-set debug_parallel_query to on;
-
-explain (verbose, costs off) select error_trap_test();
-select error_trap_test();
-
-reset debug_parallel_query;
-
-drop function error_trap_test();
 drop function zero_divide();
+drop function stacked_diagnostics_test();
 
 -- check cases where implicit SQLSTATE variable could be confused with
 -- SQLSTATE as a keyword, cf bug #5524
@@ -4752,12 +4732,12 @@ END; $$ LANGUAGE plpgsql;
 SELECT * FROM get_from_partitioned_table(1) AS t;
 
 CREATE OR REPLACE FUNCTION list_partitioned_table()
-RETURNS SETOF public.partitioned_table.a%TYPE AS $$
+RETURNS SETOF partitioned_table.a%TYPE AS $$
 DECLARE
-    row public.partitioned_table%ROWTYPE;
-    a_val public.partitioned_table.a%TYPE;
+    row partitioned_table%ROWTYPE;
+    a_val partitioned_table.a%TYPE;
 BEGIN
-    FOR row IN SELECT * FROM public.partitioned_table ORDER BY a LOOP
+    FOR row IN SELECT * FROM partitioned_table ORDER BY a LOOP
         a_val := row.a;
         RETURN NEXT a_val;
     END LOOP;

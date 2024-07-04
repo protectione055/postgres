@@ -1,11 +1,10 @@
-# Copyright (c) 2022-2024, PostgreSQL Global Development Group
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
 
 subdir('initdb')
 subdir('pg_amcheck')
 subdir('pg_archivecleanup')
 subdir('pg_basebackup')
 subdir('pg_checksums')
-subdir('pg_combinebackup')
 subdir('pg_config')
 subdir('pg_controldata')
 subdir('pg_ctl')
@@ -17,7 +16,6 @@ subdir('pg_test_timing')
 subdir('pg_upgrade')
 subdir('pg_verifybackup')
 subdir('pg_waldump')
-subdir('pg_walsummary')
 subdir('pgbench')
 subdir('pgevent')
 subdir('psql')

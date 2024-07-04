@@ -34,7 +34,7 @@
  *		plan normally and pass back the results.
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -48,6 +48,7 @@
 #include "executor/executor.h"
 #include "executor/nodeResult.h"
 #include "miscadmin.h"
+#include "utils/memutils.h"
 
 
 /* ----------------------------------------------------------------
@@ -239,6 +240,16 @@ ExecInitResult(Result *node, EState *estate, int eflags)
 void
 ExecEndResult(ResultState *node)
 {
+	/*
+	 * Free the exprcontext
+	 */
+	ExecFreeExprContext(&node->ps);
+
+	/*
+	 * clean out the tuple table
+	 */
+	ExecClearTuple(node->ps.ps_ResultTupleSlot);
+
 	/*
 	 * shut down subplans
 	 */

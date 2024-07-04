@@ -4,7 +4,7 @@
  *	 Implementation of generic xlog records.
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/access/transam/generic_xlog.c
@@ -17,6 +17,7 @@
 #include "access/generic_xlog.h"
 #include "access/xlogutils.h"
 #include "miscadmin.h"
+#include "utils/memutils.h"
 
 /*-------------------------------------------------------------------------
  * Internally, a delta between pages consists of a set of fragments.  Each
@@ -347,8 +348,8 @@ GenericXLogFinish(GenericXLogState *state)
 		START_CRIT_SECTION();
 
 		/*
-		 * Compute deltas if necessary, write changes to buffers, mark buffers
-		 * dirty, and register changes.
+		 * Compute deltas if necessary, write changes to buffers, mark
+		 * buffers dirty, and register changes.
 		 */
 		for (i = 0; i < MAX_GENERIC_XLOG_PAGES; i++)
 		{

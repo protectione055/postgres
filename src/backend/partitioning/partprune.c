@@ -25,7 +25,7 @@
  *
  * See gen_partprune_steps_internal() for more details on step generation.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -52,6 +52,7 @@
 #include "parser/parsetree.h"
 #include "partitioning/partbounds.h"
 #include "partitioning/partprune.h"
+#include "rewrite/rewriteManip.h"
 #include "utils/array.h"
 #include "utils/lsyscache.h"
 
@@ -81,7 +82,7 @@ typedef enum PartClauseMatchStatus
 	PARTCLAUSE_MATCH_NULLNESS,
 	PARTCLAUSE_MATCH_STEPS,
 	PARTCLAUSE_MATCH_CONTRADICT,
-	PARTCLAUSE_UNSUPPORTED,
+	PARTCLAUSE_UNSUPPORTED
 } PartClauseMatchStatus;
 
 /*
@@ -92,7 +93,7 @@ typedef enum PartClauseTarget
 {
 	PARTTARGET_PLANNER,			/* want to prune during planning */
 	PARTTARGET_INITIAL,			/* want to prune during executor startup */
-	PARTTARGET_EXEC,			/* want to prune during each plan node scan */
+	PARTTARGET_EXEC				/* want to prune during each plan node scan */
 } PartClauseTarget;
 
 /*
@@ -199,7 +200,7 @@ static PartClauseMatchStatus match_boolean_partition_clause(Oid partopfamily,
 															Expr *clause,
 															Expr *partkey,
 															Expr **outconst,
-															bool *notclause);
+															bool *noteq);
 static void partkey_datum_from_expr(PartitionPruneContext *context,
 									Expr *expr, int stateidx,
 									Datum *value, bool *isnull);
@@ -1797,14 +1798,13 @@ match_clause_to_partition_key(GeneratePruningStepsContext *context,
 	Oid			partopfamily = part_scheme->partopfamily[partkeyidx],
 				partcoll = part_scheme->partcollation[partkeyidx];
 	Expr	   *expr;
-	bool		notclause;
+	bool		noteq;
 
 	/*
 	 * Recognize specially shaped clauses that match a Boolean partition key.
 	 */
 	boolmatchstatus = match_boolean_partition_clause(partopfamily, clause,
-													 partkey, &expr,
-													 &notclause);
+													 partkey, &expr, &noteq);
 
 	if (boolmatchstatus == PARTCLAUSE_MATCH_CLAUSE)
 	{
@@ -1818,14 +1818,14 @@ match_clause_to_partition_key(GeneratePruningStepsContext *context,
 		 * punt it off to gen_partprune_steps_internal() to generate pruning
 		 * steps.
 		 */
-		if (notclause)
+		if (noteq)
 		{
 			List	   *new_clauses;
 			List	   *or_clause;
 			BooleanTest *new_booltest = (BooleanTest *) copyObject(clause);
 			NullTest   *nulltest;
 
-			/* We expect 'notclause' to only be set to true for BooleanTests */
+			/* We expect 'noteq' to only be set to true for BooleanTests */
 			Assert(IsA(clause, BooleanTest));
 
 			/* reverse the bool test */
@@ -1836,8 +1836,9 @@ match_clause_to_partition_key(GeneratePruningStepsContext *context,
 			else
 			{
 				/*
-				 * We only expect match_boolean_partition_clause to return
-				 * PARTCLAUSE_MATCH_CLAUSE for IS_NOT_TRUE and IS_NOT_FALSE.
+				 * We only expect match_boolean_partition_clause to match for
+				 * IS_NOT_TRUE and IS_NOT_FALSE.  IS_NOT_UNKNOWN is not
+				 * supported.
 				 */
 				Assert(false);
 			}
@@ -1874,15 +1875,6 @@ match_clause_to_partition_key(GeneratePruningStepsContext *context,
 		*pc = partclause;
 
 		return PARTCLAUSE_MATCH_CLAUSE;
-	}
-	else if (boolmatchstatus == PARTCLAUSE_MATCH_NULLNESS)
-	{
-		/*
-		 * Handle IS UNKNOWN and IS NOT UNKNOWN.  These just logically
-		 * translate to IS NULL and IS NOT NULL.
-		 */
-		*clause_is_not_null = notclause;
-		return PARTCLAUSE_MATCH_NULLNESS;
 	}
 	else if (IsA(clause, OpExpr) &&
 			 list_length(((OpExpr *) clause)->args) == 2)
@@ -1944,11 +1936,9 @@ match_clause_to_partition_key(GeneratePruningStepsContext *context,
 		 * whatsoever, but their negators (equality) are.  We can use one of
 		 * those if we find it, but only for list partitioning.
 		 *
-		 * Note: we report NOMATCH on failure if the negator isn't the
-		 * equality operator for the partkey's opfamily as other partkeys may
-		 * have the same expression but different opfamily.  That's unlikely,
-		 * but not much more so than duplicate expressions with different
-		 * collations.
+		 * Note: we report NOMATCH on failure, in case a later partkey has the
+		 * same expression but different opfamily.  That's unlikely, but not
+		 * much more so than duplicate expressions with different collations.
 		 */
 		if (op_in_opfamily(opno, partopfamily))
 		{
@@ -1958,9 +1948,8 @@ match_clause_to_partition_key(GeneratePruningStepsContext *context,
 		}
 		else
 		{
-			/* not supported for anything apart from LIST partitioned tables */
 			if (part_scheme->strategy != PARTITION_STRATEGY_LIST)
-				return PARTCLAUSE_UNSUPPORTED;
+				return PARTCLAUSE_NOMATCH;
 
 			/* See if the negator is equality */
 			negator = get_negator(opno);
@@ -2935,7 +2924,7 @@ get_matching_list_bounds(PartitionPruneContext *context,
  * multiple pruning steps might exclude it, so we infer its inclusion
  * elsewhere.
  *
- * 'opstrategy' must be a btree strategy number.
+ * 'opstrategy' if non-zero must be a btree strategy number.
  *
  * 'values' contains Datums indexed by the partition key to use for pruning.
  *
@@ -3660,23 +3649,22 @@ perform_pruning_combine_step(PartitionPruneContext *context,
  * match_boolean_partition_clause
  *
  * If we're able to match the clause to the partition key as specially-shaped
- * boolean clause, set *outconst to a Const containing a true, false or NULL
- * value, set *notclause according to if the clause was in the "not" form,
- * i.e. "IS NOT TRUE", "IS NOT FALSE" or "IS NOT UNKNOWN" and return
- * PARTCLAUSE_MATCH_CLAUSE for "IS [NOT] (TRUE|FALSE)" clauses and
- * PARTCLAUSE_MATCH_NULLNESS for "IS [NOT] UNKNOWN" clauses.  Otherwise,
- * return PARTCLAUSE_UNSUPPORTED if the clause cannot be used for partition
- * pruning, and PARTCLAUSE_NOMATCH for supported clauses that do not match this
- * 'partkey'.
+ * boolean clause, set *outconst to a Const containing a true or false value,
+ * set *noteq according to if the clause was in the "not" form, i.e. "is not
+ * true" or "is not false", and return PARTCLAUSE_MATCH_CLAUSE.  Returns
+ * PARTCLAUSE_UNSUPPORTED if the clause is not a boolean clause or if the
+ * boolean clause is unsuitable for partition pruning.  Returns
+ * PARTCLAUSE_NOMATCH if it's a bool quals but just does not match this
+ * partition key.  *outconst is set to NULL in the latter two cases.
  */
 static PartClauseMatchStatus
 match_boolean_partition_clause(Oid partopfamily, Expr *clause, Expr *partkey,
-							   Expr **outconst, bool *notclause)
+							   Expr **outconst, bool *noteq)
 {
 	Expr	   *leftop;
 
 	*outconst = NULL;
-	*notclause = false;
+	*noteq = false;
 
 	/*
 	 * Partitioning currently can only use built-in AMs, so checking for
@@ -3689,6 +3677,11 @@ match_boolean_partition_clause(Oid partopfamily, Expr *clause, Expr *partkey,
 	{
 		BooleanTest *btest = (BooleanTest *) clause;
 
+		/* Only IS [NOT] TRUE/FALSE are any good to us */
+		if (btest->booltesttype == IS_UNKNOWN ||
+			btest->booltesttype == IS_NOT_UNKNOWN)
+			return PARTCLAUSE_UNSUPPORTED;
+
 		leftop = btest->arg;
 		if (IsA(leftop, RelabelType))
 			leftop = ((RelabelType *) leftop)->arg;
@@ -3698,28 +3691,23 @@ match_boolean_partition_clause(Oid partopfamily, Expr *clause, Expr *partkey,
 			switch (btest->booltesttype)
 			{
 				case IS_NOT_TRUE:
-					*notclause = true;
+					*noteq = true;
 					/* fall through */
 				case IS_TRUE:
 					*outconst = (Expr *) makeBoolConst(true, false);
-					return PARTCLAUSE_MATCH_CLAUSE;
+					break;
 				case IS_NOT_FALSE:
-					*notclause = true;
+					*noteq = true;
 					/* fall through */
 				case IS_FALSE:
 					*outconst = (Expr *) makeBoolConst(false, false);
-					return PARTCLAUSE_MATCH_CLAUSE;
-				case IS_NOT_UNKNOWN:
-					*notclause = true;
-					/* fall through */
-				case IS_UNKNOWN:
-					return PARTCLAUSE_MATCH_NULLNESS;
+					break;
 				default:
 					return PARTCLAUSE_UNSUPPORTED;
 			}
 		}
-		/* does not match partition key */
-		return PARTCLAUSE_NOMATCH;
+		if (*outconst)
+			return PARTCLAUSE_MATCH_CLAUSE;
 	}
 	else
 	{
@@ -3735,11 +3723,12 @@ match_boolean_partition_clause(Oid partopfamily, Expr *clause, Expr *partkey,
 			*outconst = (Expr *) makeBoolConst(!is_not_clause, false);
 		else if (equal(negate_clause((Node *) leftop), partkey))
 			*outconst = (Expr *) makeBoolConst(is_not_clause, false);
-		else
-			return PARTCLAUSE_NOMATCH;
 
-		return PARTCLAUSE_MATCH_CLAUSE;
+		if (*outconst)
+			return PARTCLAUSE_MATCH_CLAUSE;
 	}
+
+	return PARTCLAUSE_NOMATCH;
 }
 
 /*

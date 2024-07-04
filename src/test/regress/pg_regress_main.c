@@ -8,7 +8,7 @@
  *
  * This code is released under the terms of the PostgreSQL License.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/test/regress/pg_regress_main.c
@@ -18,7 +18,6 @@
 
 #include "postgres_fe.h"
 
-#include "lib/stringinfo.h"
 #include "pg_regress.h"
 
 /*
@@ -35,7 +34,8 @@ psql_start_test(const char *testname,
 	char		infile[MAXPGPATH];
 	char		outfile[MAXPGPATH];
 	char		expectfile[MAXPGPATH];
-	StringInfoData psql_cmd;
+	char		psql_cmd[MAXPGPATH * 3];
+	size_t		offset = 0;
 	char	   *appnameenv;
 
 	/*
@@ -62,29 +62,40 @@ psql_start_test(const char *testname,
 	add_stringlist_item(resultfiles, outfile);
 	add_stringlist_item(expectfiles, expectfile);
 
-	initStringInfo(&psql_cmd);
-
 	if (launcher)
-		appendStringInfo(&psql_cmd, "%s ", launcher);
+	{
+		offset += snprintf(psql_cmd + offset, sizeof(psql_cmd) - offset,
+						   "%s ", launcher);
+		if (offset >= sizeof(psql_cmd))
+		{
+			fprintf(stderr, _("command too long\n"));
+			exit(2);
+		}
+	}
 
 	/*
 	 * Use HIDE_TABLEAM to hide different AMs to allow to use regression tests
 	 * against different AMs without unnecessary differences.
 	 */
-	appendStringInfo(&psql_cmd,
-					 "\"%s%spsql\" -X -a -q -d \"%s\" %s < \"%s\" > \"%s\" 2>&1",
-					 bindir ? bindir : "",
-					 bindir ? "/" : "",
-					 dblist->str,
-					 "-v HIDE_TABLEAM=on -v HIDE_TOAST_COMPRESSION=on",
-					 infile,
-					 outfile);
+	offset += snprintf(psql_cmd + offset, sizeof(psql_cmd) - offset,
+					   "\"%s%spsql\" -X -a -q -d \"%s\" %s < \"%s\" > \"%s\" 2>&1",
+					   bindir ? bindir : "",
+					   bindir ? "/" : "",
+					   dblist->str,
+					   "-v HIDE_TABLEAM=on -v HIDE_TOAST_COMPRESSION=on",
+					   infile,
+					   outfile);
+	if (offset >= sizeof(psql_cmd))
+	{
+		fprintf(stderr, _("command too long\n"));
+		exit(2);
+	}
 
 	appnameenv = psprintf("pg_regress/%s", testname);
 	setenv("PGAPPNAME", appnameenv, 1);
 	free(appnameenv);
 
-	pid = spawn_process(psql_cmd.data);
+	pid = spawn_process(psql_cmd);
 
 	if (pid == INVALID_PID)
 	{
@@ -94,8 +105,6 @@ psql_start_test(const char *testname,
 	}
 
 	unsetenv("PGAPPNAME");
-
-	pfree(psql_cmd.data);
 
 	return pid;
 }

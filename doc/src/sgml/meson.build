@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, PostgreSQL Global Development Group
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
 
 docs = []
 installdocs = []
@@ -46,18 +46,6 @@ doc_generated += custom_target('errcodes-table.sgml',
   capture: true,
 )
 
-doc_generated += custom_target('wait_event_types.sgml',
-  input: files(
-    '../../../src/backend/utils/activity/wait_event_names.txt'),
-  output: 'wait_event_types.sgml',
-  command: [perl,
-    files('../../../src/backend/utils/activity/generate-wait_event_types.pl'),
-    '--outdir', '@OUTDIR@', '--docs', '@INPUT@'],
-  build_by_default: false,
-  install: false,
-  capture: false,
-)
-
 # FIXME: this actually has further inputs, adding depfile support to
 # generate-keywords-table.pl is probably the best way to address that
 # robustly.
@@ -66,15 +54,6 @@ doc_generated += custom_target('keywords-table.sgml',
     '../../../src/include/parser/kwlist.h'),
   output: 'keywords-table.sgml',
   command: [perl, files('generate-keywords-table.pl'), '@CURRENT_SOURCE_DIR@'],
-  build_by_default: false,
-  install: false,
-  capture: true,
-)
-
-doc_generated += custom_target('targets-meson.sgml',
-  input: files('targets-meson.txt'),
-  output: 'targets-meson.sgml',
-  command: [perl, files('generate-targets-meson.pl'), '@INPUT@'],
   build_by_default: false,
   install: false,
   capture: true,
@@ -151,8 +130,7 @@ if docs_dep.found()
       '--install-dir-contents', dir_doc_html, html],
     build_always_stale: true, build_by_default: false,
   )
-  alias_target('html', html)
-  alias_target('install-html', install_doc_html)
+  alias_target('install-doc-html', install_doc_html)
 
   # build and install multi-page html docs as part of docs target
   docs += html
@@ -183,6 +161,43 @@ endif
 
 
 #
+# INSTALL in html, text
+#
+if docs_dep.found()
+  # Depend on postgres_full_xml, so validity errors are raised in one place,
+  # and so dependencies don't need to be re-specified.
+  install_xml = custom_target('INSTALL.xml',
+    input: ['standalone-profile.xsl', 'standalone-install.xml'],
+    output: 'INSTALL.xml',
+    depfile: 'INSTALL.xml.d',
+    depends: postgres_full_xml,
+    command: [xsltproc, '-o', '@OUTPUT@', xsltproc_flags, '--xinclude', '@INPUT@'],
+    build_by_default: false,
+  )
+  install_html = custom_target('INSTALL.html',
+    input: ['stylesheet-text.xsl', install_xml],
+    output: 'INSTALL.html',
+    depfile: 'INSTALL.html.d',
+    command: [xsltproc, '-o', '@OUTPUT@', xsltproc_html_flags, '@INPUT@'],
+    build_by_default: false,
+  )
+  alldocs += install_html
+
+  if pandoc.found()
+    # XXX: Makefile does an iconv translit here, but unclear why?
+    install = custom_target('INSTALL',
+      input: [install_html],
+      output: 'INSTALL',
+      command: [pandoc, '-t', 'plain', '-o', '@OUTPUT@', '@INPUT@'],
+      build_by_default: false,
+    )
+    alldocs += install
+  endif
+
+endif
+
+
+#
 # Man pages
 #
 if docs_dep.found()
@@ -204,12 +219,11 @@ if docs_dep.found()
       '--install-dirs', dir_man, '@INPUT@'],
     build_always_stale: true, build_by_default: false,
   )
-  alias_target('man', man)
-  alias_target('install-man', install_doc_man)
+  alias_target('install-doc-man', install_doc_man)
 
-  # built and installed as part of the docs target
+  # even though we don't want to build man pages as part of 'docs', we do want
+  # to install them as part of install-docs
   installdocs += install_doc_man
-  docs += man
 endif
 
 

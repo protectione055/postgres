@@ -41,15 +41,10 @@
  * transactions we need Snapshots that see intermediate versions of the
  * catalog in a transaction. During normal operation this is achieved by using
  * CommandIds/cmin/cmax. The problem with that however is that for space
- * efficiency reasons, the cmin and cmax are not included in WAL records. We
- * cannot read the cmin/cmax from the tuple itself, either, because it is
- * reset on crash recovery. Even if we could, we could not decode combocids
- * which are only tracked in the original backend's memory. To work around
- * that, heapam writes an extra WAL record (XLOG_HEAP2_NEW_CID) every time a
- * catalog row is modified, which includes the cmin and cmax of the
- * tuple. During decoding, we insert the ctid->(cmin,cmax) mappings into the
- * reorder buffer, and use them at visibility checks instead of the cmin/cmax
- * on the tuple itself. Check the reorderbuffer.c's comment above
+ * efficiency reasons only one value of that is stored
+ * (cf. combocid.c). Since combo CIDs are only available in memory we log
+ * additional information which allows us to get the original (cmin, cmax)
+ * pair during visibility checks. Check the reorderbuffer.c's comment above
  * ResolveCminCmaxDuringDecoding() for details.
  *
  * To facilitate all this we need our own visibility routine, as the normal
@@ -112,7 +107,7 @@
  * is a convenient point to initialize replication from, which is why we
  * export a snapshot at that point, which *can* be used to read normal data.
  *
- * Copyright (c) 2012-2024, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/replication/logical/snapbuild.c
@@ -134,6 +129,7 @@
 #include "replication/logical.h"
 #include "replication/reorderbuffer.h"
 #include "replication/snapbuild.h"
+#include "storage/block.h"		/* debugging output */
 #include "storage/fd.h"
 #include "storage/lmgr.h"
 #include "storage/proc.h"
@@ -2133,27 +2129,4 @@ CheckPointSnapBuild(void)
 		}
 	}
 	FreeDir(snap_dir);
-}
-
-/*
- * Check if a logical snapshot at the specified point has been serialized.
- */
-bool
-SnapBuildSnapshotExists(XLogRecPtr lsn)
-{
-	char		path[MAXPGPATH];
-	int			ret;
-	struct stat stat_buf;
-
-	sprintf(path, "pg_logical/snapshots/%X-%X.snap",
-			LSN_FORMAT_ARGS(lsn));
-
-	ret = stat(path, &stat_buf);
-
-	if (ret != 0 && errno != ENOENT)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not stat file \"%s\": %m", path)));
-
-	return ret == 0;
 }

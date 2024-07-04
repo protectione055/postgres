@@ -7,7 +7,7 @@
  *	  transfer pending entries into the regular index structure.  This
  *	  wins because bulk insertion is much more efficient than retail.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -31,7 +31,7 @@
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
 #include "utils/acl.h"
-#include "utils/fmgrprotos.h"
+#include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
@@ -397,9 +397,6 @@ ginHeapTupleFastInsert(GinState *ginstate, GinTupleCollector *collector)
 		}
 
 		Assert((ptr - collectordata) <= collector->sumsize);
-
-		MarkBufferDirty(buffer);
-
 		if (needWal)
 		{
 			XLogRegisterBuffer(1, buffer, REGBUF_STANDARD);
@@ -407,6 +404,8 @@ ginHeapTupleFastInsert(GinState *ginstate, GinTupleCollector *collector)
 		}
 
 		metadata->tailFreeSize = PageGetExactFreeSpace(page);
+
+		MarkBufferDirty(buffer);
 	}
 
 	/*
@@ -812,7 +811,7 @@ ginInsertCleanup(GinState *ginstate, bool full_clean,
 		 */
 		LockPage(index, GIN_METAPAGE_BLKNO, ExclusiveLock);
 		workMemory =
-			(AmAutoVacuumWorkerProcess() && autovacuum_work_mem != -1) ?
+			(IsAutoVacuumWorkerProcess() && autovacuum_work_mem != -1) ?
 			autovacuum_work_mem : maintenance_work_mem;
 	}
 	else

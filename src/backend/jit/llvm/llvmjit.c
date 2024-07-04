@@ -3,7 +3,7 @@
  * llvmjit.c
  *	  Core part of the LLVM JIT provider.
  *
- * Copyright (c) 2016-2024, PostgreSQL Global Development Group
+ * Copyright (c) 2016-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/jit/llvm/llvmjit.c
@@ -34,7 +34,9 @@
 #include <llvm-c/Transforms/IPO.h>
 #include <llvm-c/Transforms/PassManagerBuilder.h>
 #include <llvm-c/Transforms/Scalar.h>
+#if LLVM_VERSION_MAJOR > 6
 #include <llvm-c/Transforms/Utils.h>
+#endif
 #endif
 
 #include "jit/llvmjit.h"
@@ -43,7 +45,7 @@
 #include "portability/instr_time.h"
 #include "storage/ipc.h"
 #include "utils/memutils.h"
-#include "utils/resowner.h"
+#include "utils/resowner_private.h"
 
 #define LLVMJIT_LLVM_CONTEXT_REUSE_MAX 100
 
@@ -66,14 +68,23 @@ LLVMTypeRef TypeParamBool;
 LLVMTypeRef TypeStorageBool;
 LLVMTypeRef TypePGFunction;
 LLVMTypeRef StructNullableDatum;
+LLVMTypeRef StructHeapTupleFieldsField3;
+LLVMTypeRef StructHeapTupleFields;
+LLVMTypeRef StructHeapTupleHeaderData;
+LLVMTypeRef StructHeapTupleDataChoice;
 LLVMTypeRef StructHeapTupleData;
 LLVMTypeRef StructMinimalTupleData;
+LLVMTypeRef StructItemPointerData;
+LLVMTypeRef StructBlockId;
+LLVMTypeRef StructFormPgAttribute;
+LLVMTypeRef StructTupleConstr;
 LLVMTypeRef StructTupleDescData;
 LLVMTypeRef StructTupleTableSlot;
-LLVMTypeRef StructHeapTupleHeaderData;
 LLVMTypeRef StructHeapTupleTableSlot;
 LLVMTypeRef StructMinimalTupleTableSlot;
 LLVMTypeRef StructMemoryContextData;
+LLVMTypeRef StructPGFinfoRecord;
+LLVMTypeRef StructFmgrInfo;
 LLVMTypeRef StructFunctionCallInfoData;
 LLVMTypeRef StructExprContext;
 LLVMTypeRef StructExprEvalStep;
@@ -87,7 +98,7 @@ LLVMValueRef AttributeTemplate;
 LLVMValueRef ExecEvalSubroutineTemplate;
 LLVMValueRef ExecEvalBoolSubroutineTemplate;
 
-static LLVMModuleRef llvm_types_module = NULL;
+LLVMModuleRef llvm_types_module = NULL;
 
 static bool llvm_session_initialized = false;
 static size_t llvm_generation = 0;
@@ -128,30 +139,6 @@ static uint64_t llvm_resolve_symbol(const char *name, void *ctx);
 static LLVMOrcLLJITRef llvm_create_jit_instance(LLVMTargetMachineRef tm);
 static char *llvm_error_message(LLVMErrorRef error);
 #endif							/* LLVM_VERSION_MAJOR > 11 */
-
-/* ResourceOwner callbacks to hold JitContexts  */
-static void ResOwnerReleaseJitContext(Datum res);
-
-static const ResourceOwnerDesc jit_resowner_desc =
-{
-	.name = "LLVM JIT context",
-	.release_phase = RESOURCE_RELEASE_BEFORE_LOCKS,
-	.release_priority = RELEASE_PRIO_JIT_CONTEXTS,
-	.ReleaseResource = ResOwnerReleaseJitContext,
-	.DebugPrint = NULL			/* the default message is fine */
-};
-
-/* Convenience wrappers over ResourceOwnerRemember/Forget */
-static inline void
-ResourceOwnerRememberJIT(ResourceOwner owner, LLVMJitContext *handle)
-{
-	ResourceOwnerRemember(owner, PointerGetDatum(handle), &jit_resowner_desc);
-}
-static inline void
-ResourceOwnerForgetJIT(ResourceOwner owner, LLVMJitContext *handle)
-{
-	ResourceOwnerForget(owner, PointerGetDatum(handle), &jit_resowner_desc);
-}
 
 PG_MODULE_MAGIC;
 
@@ -242,7 +229,7 @@ llvm_create_context(int jitFlags)
 
 	llvm_recreate_llvm_context();
 
-	ResourceOwnerEnlarge(CurrentResourceOwner);
+	ResourceOwnerEnlargeJIT(CurrentResourceOwner);
 
 	context = MemoryContextAllocZero(TopMemoryContext,
 									 sizeof(LLVMJitContext));
@@ -250,7 +237,7 @@ llvm_create_context(int jitFlags)
 
 	/* ensure cleanup */
 	context->base.resowner = CurrentResourceOwner;
-	ResourceOwnerRememberJIT(CurrentResourceOwner, context);
+	ResourceOwnerRememberJIT(CurrentResourceOwner, PointerGetDatum(context));
 
 	llvm_jit_context_in_use_count++;
 
@@ -322,9 +309,6 @@ llvm_release_context(JitContext *context)
 	llvm_jit_context->handles = NIL;
 
 	llvm_leave_fatal_on_oom();
-
-	if (context->resowner)
-		ResourceOwnerForgetJIT(context->resowner, llvm_jit_context);
 }
 
 /*
@@ -379,7 +363,10 @@ llvm_expand_funcname(struct LLVMJitContext *context, const char *basename)
 void *
 llvm_get_function(LLVMJitContext *context, const char *funcname)
 {
+#if LLVM_VERSION_MAJOR > 11 || \
+	defined(HAVE_DECL_LLVMORCGETSYMBOLADDRESSIN) && HAVE_DECL_LLVMORCGETSYMBOLADDRESSIN
 	ListCell   *lc;
+#endif
 
 	llvm_assert_in_fatal_section();
 
@@ -427,7 +414,7 @@ llvm_get_function(LLVMJitContext *context, const char *funcname)
 		if (addr)
 			return (void *) (uintptr_t) addr;
 	}
-#else
+#elif defined(HAVE_DECL_LLVMORCGETSYMBOLADDRESSIN) && HAVE_DECL_LLVMORCGETSYMBOLADDRESSIN
 	foreach(lc, context->handles)
 	{
 		LLVMOrcTargetAddress addr;
@@ -435,6 +422,28 @@ llvm_get_function(LLVMJitContext *context, const char *funcname)
 
 		addr = 0;
 		if (LLVMOrcGetSymbolAddressIn(handle->stack, &addr, handle->orc_handle, funcname))
+			elog(ERROR, "failed to look up symbol \"%s\"", funcname);
+		if (addr)
+			return (void *) (uintptr_t) addr;
+	}
+#elif LLVM_VERSION_MAJOR < 5
+	{
+		LLVMOrcTargetAddress addr;
+
+		if ((addr = LLVMOrcGetSymbolAddress(llvm_opt0_orc, funcname)))
+			return (void *) (uintptr_t) addr;
+		if ((addr = LLVMOrcGetSymbolAddress(llvm_opt3_orc, funcname)))
+			return (void *) (uintptr_t) addr;
+	}
+#else
+	{
+		LLVMOrcTargetAddress addr;
+
+		if (LLVMOrcGetSymbolAddress(llvm_opt0_orc, &addr, funcname))
+			elog(ERROR, "failed to look up symbol \"%s\"", funcname);
+		if (addr)
+			return (void *) (uintptr_t) addr;
+		if (LLVMOrcGetSymbolAddress(llvm_opt3_orc, &addr, funcname))
 			elog(ERROR, "failed to look up symbol \"%s\"", funcname);
 		if (addr)
 			return (void *) (uintptr_t) addr;
@@ -526,8 +535,12 @@ llvm_copy_attributes_at_index(LLVMValueRef v_from, LLVMValueRef v_to, uint32 ind
 	int			num_attributes;
 	LLVMAttributeRef *attrs;
 
-	num_attributes = LLVMGetAttributeCountAtIndex(v_from, index);
+	num_attributes = LLVMGetAttributeCountAtIndexPG(v_from, index);
 
+	/*
+	 * Not just for efficiency: LLVM <= 3.9 crashes when
+	 * LLVMGetAttributesAtIndex() is called for an index with 0 attributes.
+	 */
 	if (num_attributes == 0)
 		return;
 
@@ -822,9 +835,11 @@ llvm_compile_module(LLVMJitContext *context)
 			elog(ERROR, "failed to JIT module: %s",
 				 llvm_error_message(error));
 
+		handle->lljit = compile_orc;
+
 		/* LLVMOrcLLJITAddLLVMIRModuleWithRT takes ownership of the module */
 	}
-#else
+#elif LLVM_VERSION_MAJOR > 6
 	{
 		handle->stack = compile_orc;
 		if (LLVMOrcAddEagerlyCompiledIR(compile_orc, &handle->orc_handle, context->module,
@@ -832,6 +847,26 @@ llvm_compile_module(LLVMJitContext *context)
 			elog(ERROR, "failed to JIT module");
 
 		/* LLVMOrcAddEagerlyCompiledIR takes ownership of the module */
+	}
+#elif LLVM_VERSION_MAJOR > 4
+	{
+		LLVMSharedModuleRef smod;
+
+		smod = LLVMOrcMakeSharedModule(context->module);
+		handle->stack = compile_orc;
+		if (LLVMOrcAddEagerlyCompiledIR(compile_orc, &handle->orc_handle, smod,
+										llvm_resolve_symbol, NULL))
+			elog(ERROR, "failed to JIT module");
+
+		LLVMOrcDisposeSharedModuleRef(smod);
+	}
+#else							/* LLVM 4.0 and 3.9 */
+	{
+		handle->stack = compile_orc;
+		handle->orc_handle = LLVMOrcAddEagerlyCompiledIR(compile_orc, context->module,
+														 llvm_resolve_symbol, NULL);
+
+		LLVMDisposeModule(context->module);
 	}
 #endif
 
@@ -1033,12 +1068,20 @@ llvm_shutdown(int code, Datum arg)
 
 		if (llvm_opt3_orc)
 		{
+#if defined(HAVE_DECL_LLVMORCREGISTERPERF) && HAVE_DECL_LLVMORCREGISTERPERF
+			if (jit_profiling_support)
+				LLVMOrcUnregisterPerf(llvm_opt3_orc);
+#endif
 			LLVMOrcDisposeInstance(llvm_opt3_orc);
 			llvm_opt3_orc = NULL;
 		}
 
 		if (llvm_opt0_orc)
 		{
+#if defined(HAVE_DECL_LLVMORCREGISTERPERF) && HAVE_DECL_LLVMORCREGISTERPERF
+			if (jit_profiling_support)
+				LLVMOrcUnregisterPerf(llvm_opt0_orc);
+#endif
 			LLVMOrcDisposeInstance(llvm_opt0_orc);
 			llvm_opt0_orc = NULL;
 		}
@@ -1365,15 +1408,3 @@ llvm_error_message(LLVMErrorRef error)
 }
 
 #endif							/* LLVM_VERSION_MAJOR > 11 */
-
-/*
- * ResourceOwner callbacks
- */
-static void
-ResOwnerReleaseJitContext(Datum res)
-{
-	JitContext *context = (JitContext *) DatumGetPointer(res);
-
-	context->resowner = NULL;
-	jit_release_context(context);
-}

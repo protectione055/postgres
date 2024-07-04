@@ -3,7 +3,7 @@
  * reinit.c
  *	  Reinitialization of unlogged relations
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -31,7 +31,7 @@ static void ResetUnloggedRelationsInDbspaceDir(const char *dbspacedirname,
 
 typedef struct
 {
-	RelFileNumber relnumber;	/* hash key */
+	Oid			reloid;			/* hash key */
 } unlogged_relation_entry;
 
 /*
@@ -195,13 +195,12 @@ ResetUnloggedRelationsInDbspaceDir(const char *dbspacedirname, int op)
 		while ((de = ReadDir(dbspace_dir, dbspacedirname)) != NULL)
 		{
 			ForkNumber	forkNum;
-			unsigned	segno;
+			int			relnumchars;
 			unlogged_relation_entry ent;
 
 			/* Skip anything that doesn't look like a relation data file. */
-			if (!parse_filename_for_nontemp_relation(de->d_name,
-													 &ent.relnumber,
-													 &forkNum, &segno))
+			if (!parse_filename_for_nontemp_relation(de->d_name, &relnumchars,
+													 &forkNum))
 				continue;
 
 			/* Also skip it unless this is the init fork. */
@@ -209,8 +208,10 @@ ResetUnloggedRelationsInDbspaceDir(const char *dbspacedirname, int op)
 				continue;
 
 			/*
-			 * Put the RelFileNumber into the hash table, if it isn't already.
+			 * Put the OID portion of the name into the hash table, if it
+			 * isn't already.
 			 */
+			ent.reloid = atooid(de->d_name);
 			(void) hash_search(hash, &ent, HASH_ENTER, NULL);
 		}
 
@@ -234,13 +235,12 @@ ResetUnloggedRelationsInDbspaceDir(const char *dbspacedirname, int op)
 		while ((de = ReadDir(dbspace_dir, dbspacedirname)) != NULL)
 		{
 			ForkNumber	forkNum;
-			unsigned	segno;
+			int			relnumchars;
 			unlogged_relation_entry ent;
 
 			/* Skip anything that doesn't look like a relation data file. */
-			if (!parse_filename_for_nontemp_relation(de->d_name,
-													 &ent.relnumber,
-													 &forkNum, &segno))
+			if (!parse_filename_for_nontemp_relation(de->d_name, &relnumchars,
+													 &forkNum))
 				continue;
 
 			/* We never remove the init fork. */
@@ -251,6 +251,7 @@ ResetUnloggedRelationsInDbspaceDir(const char *dbspacedirname, int op)
 			 * See whether the OID portion of the name shows up in the hash
 			 * table.  If so, nuke it!
 			 */
+			ent.reloid = atooid(de->d_name);
 			if (hash_search(hash, &ent, HASH_FIND, NULL))
 			{
 				snprintf(rm_path, sizeof(rm_path), "%s/%s",
@@ -284,14 +285,14 @@ ResetUnloggedRelationsInDbspaceDir(const char *dbspacedirname, int op)
 		while ((de = ReadDir(dbspace_dir, dbspacedirname)) != NULL)
 		{
 			ForkNumber	forkNum;
-			RelFileNumber relNumber;
-			unsigned	segno;
+			int			relnumchars;
+			char		relnumbuf[OIDCHARS + 1];
 			char		srcpath[MAXPGPATH * 2];
 			char		dstpath[MAXPGPATH];
 
 			/* Skip anything that doesn't look like a relation data file. */
-			if (!parse_filename_for_nontemp_relation(de->d_name, &relNumber,
-													 &forkNum, &segno))
+			if (!parse_filename_for_nontemp_relation(de->d_name, &relnumchars,
+													 &forkNum))
 				continue;
 
 			/* Also skip it unless this is the init fork. */
@@ -303,12 +304,11 @@ ResetUnloggedRelationsInDbspaceDir(const char *dbspacedirname, int op)
 					 dbspacedirname, de->d_name);
 
 			/* Construct destination pathname. */
-			if (segno == 0)
-				snprintf(dstpath, sizeof(dstpath), "%s/%u",
-						 dbspacedirname, relNumber);
-			else
-				snprintf(dstpath, sizeof(dstpath), "%s/%u.%u",
-						 dbspacedirname, relNumber, segno);
+			memcpy(relnumbuf, de->d_name, relnumchars);
+			relnumbuf[relnumchars] = '\0';
+			snprintf(dstpath, sizeof(dstpath), "%s/%s%s",
+					 dbspacedirname, relnumbuf, de->d_name + relnumchars + 1 +
+					 strlen(forkNames[INIT_FORKNUM]));
 
 			/* OK, we're ready to perform the actual copy. */
 			elog(DEBUG2, "copying %s to %s", srcpath, dstpath);
@@ -327,14 +327,14 @@ ResetUnloggedRelationsInDbspaceDir(const char *dbspacedirname, int op)
 		dbspace_dir = AllocateDir(dbspacedirname);
 		while ((de = ReadDir(dbspace_dir, dbspacedirname)) != NULL)
 		{
-			RelFileNumber relNumber;
 			ForkNumber	forkNum;
-			unsigned	segno;
+			int			relnumchars;
+			char		relnumbuf[OIDCHARS + 1];
 			char		mainpath[MAXPGPATH];
 
 			/* Skip anything that doesn't look like a relation data file. */
-			if (!parse_filename_for_nontemp_relation(de->d_name, &relNumber,
-													 &forkNum, &segno))
+			if (!parse_filename_for_nontemp_relation(de->d_name, &relnumchars,
+													 &forkNum))
 				continue;
 
 			/* Also skip it unless this is the init fork. */
@@ -342,12 +342,11 @@ ResetUnloggedRelationsInDbspaceDir(const char *dbspacedirname, int op)
 				continue;
 
 			/* Construct main fork pathname. */
-			if (segno == 0)
-				snprintf(mainpath, sizeof(mainpath), "%s/%u",
-						 dbspacedirname, relNumber);
-			else
-				snprintf(mainpath, sizeof(mainpath), "%s/%u.%u",
-						 dbspacedirname, relNumber, segno);
+			memcpy(relnumbuf, de->d_name, relnumchars);
+			relnumbuf[relnumchars] = '\0';
+			snprintf(mainpath, sizeof(mainpath), "%s/%s%s",
+					 dbspacedirname, relnumbuf, de->d_name + relnumchars + 1 +
+					 strlen(forkNames[INIT_FORKNUM]));
 
 			fsync_fname(mainpath, false);
 		}
@@ -372,82 +371,52 @@ ResetUnloggedRelationsInDbspaceDir(const char *dbspacedirname, int op)
  * This function returns true if the file appears to be in the correct format
  * for a non-temporary relation and false otherwise.
  *
- * If it returns true, it sets *relnumber, *fork, and *segno to the values
- * extracted from the filename. If it returns false, these values are set to
- * InvalidRelFileNumber, InvalidForkNumber, and 0, respectively.
+ * NB: If this function returns true, the caller is entitled to assume that
+ * *relnumchars has been set to a value no more than OIDCHARS, and thus
+ * that a buffer of OIDCHARS+1 characters is sufficient to hold the
+ * RelFileNumber portion of the filename.  This is critical to protect against
+ * a possible buffer overrun.
  */
 bool
-parse_filename_for_nontemp_relation(const char *name, RelFileNumber *relnumber,
-									ForkNumber *fork, unsigned *segno)
+parse_filename_for_nontemp_relation(const char *name, int *relnumchars,
+									ForkNumber *fork)
 {
-	unsigned long n,
-				s;
-	ForkNumber	f;
-	char	   *endp;
+	int			pos;
 
-	*relnumber = InvalidRelFileNumber;
-	*fork = InvalidForkNumber;
-	*segno = 0;
-
-	/*
-	 * Relation filenames should begin with a digit that is not a zero. By
-	 * rejecting cases involving leading zeroes, the caller can assume that
-	 * there's only one possible string of characters that could have produced
-	 * any given value for *relnumber.
-	 *
-	 * (To be clear, we don't expect files with names like 0017.3 to exist at
-	 * all -- but if 0017.3 does exist, it's a non-relation file, not part of
-	 * the main fork for relfilenode 17.)
-	 */
-	if (name[0] < '1' || name[0] > '9')
+	/* Look for a non-empty string of digits (that isn't too long). */
+	for (pos = 0; isdigit((unsigned char) name[pos]); ++pos)
+		;
+	if (pos == 0 || pos > OIDCHARS)
 		return false;
-
-	/*
-	 * Parse the leading digit string. If the value is out of range, we
-	 * conclude that this isn't a relation file at all.
-	 */
-	errno = 0;
-	n = strtoul(name, &endp, 10);
-	if (errno || name == endp || n <= 0 || n > PG_UINT32_MAX)
-		return false;
-	name = endp;
+	*relnumchars = pos;
 
 	/* Check for a fork name. */
-	if (*name != '_')
-		f = MAIN_FORKNUM;
+	if (name[pos] != '_')
+		*fork = MAIN_FORKNUM;
 	else
 	{
 		int			forkchar;
 
-		forkchar = forkname_chars(name + 1, &f);
+		forkchar = forkname_chars(&name[pos + 1], fork);
 		if (forkchar <= 0)
 			return false;
-		name += forkchar + 1;
+		pos += forkchar + 1;
 	}
 
 	/* Check for a segment number. */
-	if (*name != '.')
-		s = 0;
-	else
+	if (name[pos] == '.')
 	{
-		/* Reject leading zeroes, just like we do for RelFileNumber. */
-		if (name[1] < '1' || name[1] > '9')
-			return false;
+		int			segchar;
 
-		errno = 0;
-		s = strtoul(name + 1, &endp, 10);
-		if (errno || name + 1 == endp || s <= 0 || s > PG_UINT32_MAX)
+		for (segchar = 1; isdigit((unsigned char) name[pos + segchar]); ++segchar)
+			;
+		if (segchar <= 1)
 			return false;
-		name = endp;
+		pos += segchar;
 	}
 
 	/* Now we should be at the end. */
-	if (*name != '\0')
+	if (name[pos] != '\0')
 		return false;
-
-	/* Set out parameters and return. */
-	*relnumber = (RelFileNumber) n;
-	*fork = f;
-	*segno = (unsigned) s;
 	return true;
 }

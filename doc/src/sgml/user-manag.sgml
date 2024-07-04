@@ -350,7 +350,7 @@ ALTER ROLE myname SET enable_indexscan TO off;
    options. Thus, the fact that privileges are not inherited by default nor
    is <literal>SET ROLE</literal> granted by default is a safeguard against
    accidents, not a security feature. Also note that, because this automatic
-   grant is granted by the bootstrap superuser, it cannot be removed or changed by
+   grant is granted by the bootstrap user, it cannot be removed or changed by
    the <literal>CREATEROLE</literal> user; however, any superuser could
    revoke it, modify it, and/or issue additional such grants to other
    <literal>CREATEROLE</literal> users. Whichever <literal>CREATEROLE</literal>
@@ -681,18 +681,6 @@ DROP ROLE doomed_role;
        <entry>Allow executing
        the <link linkend="sql-checkpoint"><command>CHECKPOINT</command></link>
        command.</entry>
-      </row>
-      <row>
-       <entry>pg_maintain</entry>
-       <entry>Allow executing
-       <link linkend="sql-vacuum"><command>VACUUM</command></link>,
-       <link linkend="sql-analyze"><command>ANALYZE</command></link>,
-       <link linkend="sql-cluster"><command>CLUSTER</command></link>,
-       <link linkend="sql-refreshmaterializedview"><command>REFRESH MATERIALIZED VIEW</command></link>,
-       <link linkend="sql-reindex"><command>REINDEX</command></link>,
-       and <link linkend="sql-lock"><command>LOCK TABLE</command></link> on all
-       relations, as if having <literal>MAINTAIN</literal> rights on those
-       objects, even without having it explicitly.</entry>
       </row>
       <row>
        <entry>pg_use_reserved_connections</entry>

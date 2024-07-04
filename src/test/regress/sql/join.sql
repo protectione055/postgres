@@ -1864,11 +1864,11 @@ reset enable_nestloop;
 explain (costs off)
 select a.unique1, b.unique2
   from onek a left join onek b on a.unique1 = b.unique2
-  where (b.unique2, random() > 0) = any (select q1, random() > 0 from int8_tbl c where c.q1 < b.unique1);
+  where b.unique2 = any (select q1 from int8_tbl c where c.q1 < b.unique1);
 
 select a.unique1, b.unique2
   from onek a left join onek b on a.unique1 = b.unique2
-  where (b.unique2, random() > 0) = any (select q1, random() > 0 from int8_tbl c where c.q1 < b.unique1);
+  where b.unique2 = any (select q1 from int8_tbl c where c.q1 < b.unique1);
 
 --
 -- test full-join strength reduction
@@ -2602,7 +2602,7 @@ select * from (values (0), (1)) v(id),
 lateral (select * from int8_tbl t1,
          lateral (select * from
                     (select * from int8_tbl t2
-                     where (q1, random() > 0) = any (select q2, random() > 0 from int8_tbl t3
+                     where q1 = any (select q2 from int8_tbl t3
                                      where q2 = (select greatest(t1.q1,t2.q2))
                                        and (select v.id=0)) offset 0) ss2) ss
          where t1.q1 = ss.q2) ss0;
@@ -2611,7 +2611,7 @@ select * from (values (0), (1)) v(id),
 lateral (select * from int8_tbl t1,
          lateral (select * from
                     (select * from int8_tbl t2
-                     where (q1, random() > 0) = any (select q2, random() > 0 from int8_tbl t3
+                     where q1 = any (select q2 from int8_tbl t3
                                      where q2 = (select greatest(t1.q1,t2.q2))
                                        and (select v.id=0)) offset 0) ss2) ss
          where t1.q1 = ss.q2) ss0;
@@ -2904,27 +2904,3 @@ where exists (select 1 from j3
       and t1.unique1 < 1;
 
 drop table j3;
-
--- Exercise the "skip fetch" Bitmap Heap Scan optimization when candidate
--- tuples are discarded. This may occur when:
---   1. A join doesn't require all inner tuples to be scanned for each outer
---      tuple, and
---   2. The inner side is scanned using a bitmap heap scan, and
---   3. The bitmap heap scan is eligible for the "skip fetch" optimization.
---      This optimization is usable when no data from the underlying table is
---      needed. Use a temp table so it is only visible to this backend and
---      vacuum may reliably mark all blocks in the table all visible in the
---      visibility map.
-CREATE TEMP TABLE skip_fetch (a INT, b INT) WITH (fillfactor=10);
-INSERT INTO skip_fetch SELECT i % 3, i FROM generate_series(0,30) i;
-CREATE INDEX ON skip_fetch(a);
-VACUUM (ANALYZE) skip_fetch;
-
-SET enable_indexonlyscan = off;
-SET enable_seqscan = off;
-EXPLAIN (COSTS OFF)
-SELECT t1.a FROM skip_fetch t1 LEFT JOIN skip_fetch t2 ON t2.a = 1 WHERE t2.a IS NULL;
-SELECT t1.a FROM skip_fetch t1 LEFT JOIN skip_fetch t2 ON t2.a = 1 WHERE t2.a IS NULL;
-
-RESET enable_indexonlyscan;
-RESET enable_seqscan;

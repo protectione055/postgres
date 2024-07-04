@@ -4,7 +4,7 @@
  *	  prototypes for catalog/index.c.
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/index.h
@@ -26,7 +26,7 @@ typedef enum
 	INDEX_CREATE_SET_READY,
 	INDEX_CREATE_SET_VALID,
 	INDEX_DROP_CLEAR_VALID,
-	INDEX_DROP_SET_DEAD,
+	INDEX_DROP_SET_DEAD
 } IndexStateFlagsAction;
 
 /* options for REINDEX */
@@ -54,9 +54,9 @@ typedef struct ValidateIndexState
 } ValidateIndexState;
 
 extern void index_check_primary_key(Relation heapRel,
-									const IndexInfo *indexInfo,
+									IndexInfo *indexInfo,
 									bool is_alter_table,
-									const IndexStmt *stmt);
+									IndexStmt *stmt);
 
 #define	INDEX_CREATE_IS_PRIMARY				(1 << 0)
 #define	INDEX_CREATE_ADD_CONSTRAINT			(1 << 1)
@@ -73,14 +73,12 @@ extern Oid	index_create(Relation heapRelation,
 						 Oid parentConstraintId,
 						 RelFileNumber relFileNumber,
 						 IndexInfo *indexInfo,
-						 const List *indexColNames,
-						 Oid accessMethodId,
+						 List *indexColNames,
+						 Oid accessMethodObjectId,
 						 Oid tableSpaceId,
-						 const Oid *collationIds,
-						 const Oid *opclassIds,
-						 const Datum *opclassOptions,
-						 const int16 *coloptions,
-						 const NullableDatum *stattargets,
+						 Oid *collationObjectId,
+						 Oid *classObjectId,
+						 int16 *coloptions,
 						 Datum reloptions,
 						 bits16 flags,
 						 bits16 constr_flags,
@@ -112,7 +110,7 @@ extern void index_concurrently_set_dead(Oid heapId,
 extern ObjectAddress index_constraint_create(Relation heapRelation,
 											 Oid indexRelationId,
 											 Oid parentConstraintId,
-											 const IndexInfo *indexInfo,
+											 IndexInfo *indexInfo,
 											 const char *constraintName,
 											 char constraintType,
 											 bits16 constr_flags,
@@ -125,10 +123,10 @@ extern IndexInfo *BuildIndexInfo(Relation index);
 
 extern IndexInfo *BuildDummyIndexInfo(Relation index);
 
-extern bool CompareIndexInfo(const IndexInfo *info1, const IndexInfo *info2,
-							 const Oid *collations1, const Oid *collations2,
-							 const Oid *opfamilies1, const Oid *opfamilies2,
-							 const AttrMap *attmap);
+extern bool CompareIndexInfo(IndexInfo *info1, IndexInfo *info2,
+							 Oid *collations1, Oid *collations2,
+							 Oid *opfamilies1, Oid *opfamilies2,
+							 AttrMap *attmap);
 
 extern void BuildSpeculativeIndexInfo(Relation index, IndexInfo *ii);
 
@@ -150,9 +148,8 @@ extern void index_set_state_flags(Oid indexId, IndexStateFlagsAction action);
 
 extern Oid	IndexGetRelation(Oid indexId, bool missing_ok);
 
-extern void reindex_index(const ReindexStmt *stmt, Oid indexId,
-						  bool skip_constraint_checks, char persistence,
-						  const ReindexParams *params);
+extern void reindex_index(Oid indexId, bool skip_constraint_checks,
+						  char persistence, ReindexParams *params);
 
 /* Flag bits for reindex_relation(): */
 #define REINDEX_REL_PROCESS_TOAST			0x01
@@ -161,8 +158,7 @@ extern void reindex_index(const ReindexStmt *stmt, Oid indexId,
 #define REINDEX_REL_FORCE_INDEXES_UNLOGGED	0x08
 #define REINDEX_REL_FORCE_INDEXES_PERMANENT 0x10
 
-extern bool reindex_relation(const ReindexStmt *stmt, Oid relid, int flags,
-							 const ReindexParams *params);
+extern bool reindex_relation(Oid relid, int flags, ReindexParams *params);
 
 extern bool ReindexIsProcessingHeap(Oid heapOid);
 extern bool ReindexIsProcessingIndex(Oid indexOid);
@@ -170,7 +166,7 @@ extern bool ReindexIsProcessingIndex(Oid indexOid);
 extern void ResetReindexState(int nestLevel);
 extern Size EstimateReindexStateSpace(void);
 extern void SerializeReindexState(Size maxsize, char *start_address);
-extern void RestoreReindexState(const void *reindexstate);
+extern void RestoreReindexState(void *reindexstate);
 
 extern void IndexSetParentIndex(Relation partitionIdx, Oid parentOid);
 

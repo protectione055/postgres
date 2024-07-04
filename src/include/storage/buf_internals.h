@@ -5,7 +5,7 @@
  *	  strategy.
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/storage/buf_internals.h
@@ -26,7 +26,6 @@
 #include "storage/smgr.h"
 #include "storage/spin.h"
 #include "utils/relcache.h"
-#include "utils/resowner.h"
 
 /*
  * Buffer state is a single 32-bit variable where following data is combined.
@@ -384,32 +383,6 @@ typedef struct CkptSortItem
 
 extern PGDLLIMPORT CkptSortItem *CkptBufferIds;
 
-/* ResourceOwner callbacks to hold buffer I/Os and pins */
-extern PGDLLIMPORT const ResourceOwnerDesc buffer_io_resowner_desc;
-extern PGDLLIMPORT const ResourceOwnerDesc buffer_pin_resowner_desc;
-
-/* Convenience wrappers over ResourceOwnerRemember/Forget */
-static inline void
-ResourceOwnerRememberBuffer(ResourceOwner owner, Buffer buffer)
-{
-	ResourceOwnerRemember(owner, Int32GetDatum(buffer), &buffer_pin_resowner_desc);
-}
-static inline void
-ResourceOwnerForgetBuffer(ResourceOwner owner, Buffer buffer)
-{
-	ResourceOwnerForget(owner, Int32GetDatum(buffer), &buffer_pin_resowner_desc);
-}
-static inline void
-ResourceOwnerRememberBufferIO(ResourceOwner owner, Buffer buffer)
-{
-	ResourceOwnerRemember(owner, Int32GetDatum(buffer), &buffer_io_resowner_desc);
-}
-static inline void
-ResourceOwnerForgetBufferIO(ResourceOwner owner, Buffer buffer)
-{
-	ResourceOwnerForget(owner, Int32GetDatum(buffer), &buffer_io_resowner_desc);
-}
-
 /*
  * Internal buffer management routines
  */
@@ -445,7 +418,6 @@ extern void BufTableDelete(BufferTag *tagPtr, uint32 hashcode);
 /* localbuf.c */
 extern bool PinLocalBuffer(BufferDesc *buf_hdr, bool adjust_usagecount);
 extern void UnpinLocalBuffer(Buffer buffer);
-extern void UnpinLocalBufferNoOwner(Buffer buffer);
 extern PrefetchBufferResult PrefetchLocalBuffer(SMgrRelation smgr,
 												ForkNumber forkNum,
 												BlockNumber blockNum);

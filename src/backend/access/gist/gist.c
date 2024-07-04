@@ -4,7 +4,7 @@
  *	  interface routines for the postgres GiST index access method.
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -21,8 +21,9 @@
 #include "commands/vacuum.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
+#include "storage/lmgr.h"
 #include "storage/predicate.h"
-#include "utils/fmgrprotos.h"
+#include "utils/builtins.h"
 #include "utils/index_selfuncs.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -43,7 +44,7 @@ static void gistprunepage(Relation rel, Page page, Buffer buffer,
 
 
 #define ROTATEDIST(d) do { \
-	SplitPageLayout *tmp=(SplitPageLayout*)palloc0(sizeof(SplitPageLayout)); \
+	SplitedPageLayout *tmp=(SplitedPageLayout*)palloc0(sizeof(SplitedPageLayout)); \
 	tmp->block.blkno = InvalidBlockNumber;	\
 	tmp->buffer = InvalidBuffer;	\
 	tmp->next = (d); \
@@ -75,7 +76,6 @@ gisthandler(PG_FUNCTION_ARGS)
 	amroutine->amclusterable = true;
 	amroutine->ampredlocks = true;
 	amroutine->amcanparallel = false;
-	amroutine->amcanbuildparallel = false;
 	amroutine->amcaninclude = true;
 	amroutine->amusemaintenanceworkmem = false;
 	amroutine->amsummarizing = false;
@@ -86,7 +86,6 @@ gisthandler(PG_FUNCTION_ARGS)
 	amroutine->ambuild = gistbuild;
 	amroutine->ambuildempty = gistbuildempty;
 	amroutine->aminsert = gistinsert;
-	amroutine->aminsertcleanup = NULL;
 	amroutine->ambulkdelete = gistbulkdelete;
 	amroutine->amvacuumcleanup = gistvacuumcleanup;
 	amroutine->amcanreturn = gistcanreturn;
@@ -282,11 +281,11 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 		/* no space for insertion */
 		IndexTuple *itvec;
 		int			tlen;
-		SplitPageLayout *dist = NULL,
+		SplitedPageLayout *dist = NULL,
 				   *ptr;
 		BlockNumber oldrlink = InvalidBlockNumber;
 		GistNSN		oldnsn = 0;
-		SplitPageLayout rootpg;
+		SplitedPageLayout rootpg;
 		bool		is_rootsplit;
 		int			npage;
 
@@ -1079,7 +1078,7 @@ gistFindCorrectParent(Relation r, GISTInsertStack *child, bool is_build)
 		{
 			/*
 			 * End of chain and still didn't find parent. It's a very-very
-			 * rare situation when the root was split.
+			 * rare situation when root splitted.
 			 */
 			break;
 		}
@@ -1434,7 +1433,7 @@ gistfinishsplit(GISTInsertState *state, GISTInsertStack *stack,
  * used for XLOG and real writes buffers. Function is recursive, ie
  * it will split page until keys will fit in every page.
  */
-SplitPageLayout *
+SplitedPageLayout *
 gistSplit(Relation r,
 		  Page page,
 		  IndexTuple *itup,		/* contains compressed entry */
@@ -1445,7 +1444,7 @@ gistSplit(Relation r,
 			   *rvectup;
 	GistSplitVector v;
 	int			i;
-	SplitPageLayout *res = NULL;
+	SplitedPageLayout *res = NULL;
 
 	/* this should never recurse very deeply, but better safe than sorry */
 	check_stack_depth();
@@ -1495,7 +1494,7 @@ gistSplit(Relation r,
 
 	if (!gistfitpage(lvectup, v.splitVector.spl_nleft))
 	{
-		SplitPageLayout *resptr,
+		SplitedPageLayout *resptr,
 				   *subres;
 
 		resptr = subres = gistSplit(r, page, lvectup, v.splitVector.spl_nleft, giststate);

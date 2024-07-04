@@ -31,7 +31,7 @@
  * constraint changes are also tracked properly.
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -57,7 +57,6 @@
 #include "catalog/pg_range.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
-#include "common/int.h"
 #include "executor/executor.h"
 #include "lib/dshash.h"
 #include "optimizer/optimizer.h"
@@ -70,6 +69,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 
@@ -147,7 +147,7 @@ typedef struct TypeCacheEnumData
  * We use a separate table for storing the definitions of non-anonymous
  * record types.  Once defined, a record type will be remembered for the
  * life of the backend.  Subsequent uses of the "same" record type (where
- * sameness means equalRowTypes) will refer to the existing table entry.
+ * sameness means equalTupleDescs) will refer to the existing table entry.
  *
  * Stored record types are remembered in a linear array of TupleDescs,
  * which can be indexed quickly with the assigned typmod.  There is also
@@ -231,7 +231,7 @@ shared_record_table_compare(const void *a, const void *b, size_t size,
 	else
 		t2 = k2->u.local_tupdesc;
 
-	return equalRowTypes(t1, t2) ? 0 : 1;
+	return equalTupleDescs(t1, t2) ? 0 : 1;
 }
 
 /*
@@ -249,7 +249,7 @@ shared_record_table_hash(const void *a, size_t size, void *arg)
 	else
 		t = k->u.local_tupdesc;
 
-	return hashRowType(t);
+	return hashTupleDesc(t);
 }
 
 /* Parameters for SharedRecordTypmodRegistry's TupleDesc table. */
@@ -258,7 +258,6 @@ static const dshash_parameters srtr_record_table_params = {
 	sizeof(SharedRecordTableEntry),
 	shared_record_table_compare,
 	shared_record_table_hash,
-	dshash_memcpy,
 	LWTRANCHE_PER_SESSION_RECORD_TYPE
 };
 
@@ -268,7 +267,6 @@ static const dshash_parameters srtr_typmod_table_params = {
 	sizeof(SharedTypmodTableEntry),
 	dshash_memcmp,
 	dshash_memhash,
-	dshash_memcpy,
 	LWTRANCHE_PER_SESSION_RECORD_TYPMOD
 };
 
@@ -942,7 +940,6 @@ load_rangetype_info(TypeCacheEntry *typentry)
 	/* get opclass properties and look up the comparison function */
 	opfamilyOid = get_opclass_family(opclassOid);
 	opcintype = get_opclass_input_type(opclassOid);
-	typentry->rng_opfamily = opfamilyOid;
 
 	cmpFnOid = get_opfamily_proc(opfamilyOid, opcintype, opcintype,
 								 BTORDER_PROC);
@@ -1071,7 +1068,7 @@ load_domaintype_info(TypeCacheEntry *typentry)
 			Expr	   *check_expr;
 			DomainConstraintState *r;
 
-			/* Ignore non-CHECK constraints */
+			/* Ignore non-CHECK constraints (presently, shouldn't be any) */
 			if (c->contype != CONSTRAINT_CHECK)
 				continue;
 
@@ -1927,7 +1924,7 @@ record_type_typmod_hash(const void *data, size_t size)
 {
 	RecordCacheEntry *entry = (RecordCacheEntry *) data;
 
-	return hashRowType(entry->tupdesc);
+	return hashTupleDesc(entry->tupdesc);
 }
 
 /*
@@ -1939,7 +1936,7 @@ record_type_typmod_compare(const void *a, const void *b, size_t size)
 	RecordCacheEntry *left = (RecordCacheEntry *) a;
 	RecordCacheEntry *right = (RecordCacheEntry *) b;
 
-	return equalRowTypes(left->tupdesc, right->tupdesc) ? 0 : 1;
+	return equalTupleDescs(left->tupdesc, right->tupdesc) ? 0 : 1;
 }
 
 /*
@@ -2724,7 +2721,12 @@ enum_oid_cmp(const void *left, const void *right)
 	const EnumItem *l = (const EnumItem *) left;
 	const EnumItem *r = (const EnumItem *) right;
 
-	return pg_cmp_u32(l->enum_oid, r->enum_oid);
+	if (l->enum_oid < r->enum_oid)
+		return -1;
+	else if (l->enum_oid > r->enum_oid)
+		return 1;
+	else
+		return 0;
 }
 
 /*

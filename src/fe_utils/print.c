@@ -8,7 +8,7 @@
  * pager open/close functions, all that stuff came with it.
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/fe_utils/print.c
@@ -1401,7 +1401,7 @@ print_aligned_vertical(const printTableContent *cont,
 	}
 
 	/* find longest data cell */
-	for (ptr = cont->cells; *ptr; ptr++)
+	for (i = 0, ptr = cont->cells; *ptr; ptr++, i++)
 	{
 		int			width,
 					height,
@@ -3172,8 +3172,6 @@ void
 printTableInit(printTableContent *const content, const printTableOpt *opt,
 			   const char *title, const int ncolumns, const int nrows)
 {
-	uint64		total_cells;
-
 	content->opt = opt;
 	content->title = title;
 	content->ncolumns = ncolumns;
@@ -3181,16 +3179,7 @@ printTableInit(printTableContent *const content, const printTableOpt *opt,
 
 	content->headers = pg_malloc0((ncolumns + 1) * sizeof(*content->headers));
 
-	total_cells = (uint64) ncolumns * nrows;
-	/* Catch possible overflow.  Using >= here allows adding 1 below */
-	if (total_cells >= SIZE_MAX / sizeof(*content->cells))
-	{
-		fprintf(stderr, _("Cannot print table contents: number of cells %lld is equal to or exceeds maximum %lld.\n"),
-				(long long int) total_cells,
-				(long long int) (SIZE_MAX / sizeof(*content->cells)));
-		exit(EXIT_FAILURE);
-	}
-	content->cells = pg_malloc0((total_cells + 1) * sizeof(*content->cells));
+	content->cells = pg_malloc0((ncolumns * nrows + 1) * sizeof(*content->cells));
 
 	content->cellmustfree = NULL;
 	content->footers = NULL;
@@ -3260,17 +3249,15 @@ void
 printTableAddCell(printTableContent *const content, char *cell,
 				  const bool translate, const bool mustfree)
 {
-	uint64		total_cells;
-
 #ifndef ENABLE_NLS
 	(void) translate;			/* unused parameter */
 #endif
 
-	total_cells = (uint64) content->ncolumns * content->nrows;
-	if (content->cellsadded >= total_cells)
+	if (content->cellsadded >= content->ncolumns * content->nrows)
 	{
-		fprintf(stderr, _("Cannot add cell to table content: total cell count of %lld exceeded.\n"),
-				(long long int) total_cells);
+		fprintf(stderr, _("Cannot add cell to table content: "
+						  "total cell count of %d exceeded.\n"),
+				content->ncolumns * content->nrows);
 		exit(EXIT_FAILURE);
 	}
 
@@ -3286,7 +3273,7 @@ printTableAddCell(printTableContent *const content, char *cell,
 	{
 		if (content->cellmustfree == NULL)
 			content->cellmustfree =
-				pg_malloc0((total_cells + 1) * sizeof(bool));
+				pg_malloc0((content->ncolumns * content->nrows + 1) * sizeof(bool));
 
 		content->cellmustfree[content->cellsadded] = true;
 	}
@@ -3354,10 +3341,9 @@ printTableCleanup(printTableContent *const content)
 {
 	if (content->cellmustfree)
 	{
-		uint64		total_cells;
+		int			i;
 
-		total_cells = (uint64) content->ncolumns * content->nrows;
-		for (uint64 i = 0; i < total_cells; i++)
+		for (i = 0; i < content->nrows * content->ncolumns; i++)
 		{
 			if (content->cellmustfree[i])
 				free(unconstify(char *, content->cells[i]));

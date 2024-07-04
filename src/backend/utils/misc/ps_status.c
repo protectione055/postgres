@@ -7,7 +7,7 @@
  *
  * src/backend/utils/misc/ps_status.c
  *
- * Copyright (c) 2000-2024, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2023, PostgreSQL Global Development Group
  * various details abducted from various places
  *--------------------------------------------------------------------
  */
@@ -19,7 +19,9 @@
 #include <crt_externs.h>
 #endif
 
+#include "libpq/libpq.h"
 #include "miscadmin.h"
+#include "pgstat.h"
 #include "utils/guc.h"
 #include "utils/ps_status.h"
 
@@ -50,7 +52,7 @@ bool		update_process_title = DEFAULT_UPDATE_PROCESS_TITLE;
 #define PS_USE_SETPROCTITLE_FAST
 #elif defined(HAVE_SETPROCTITLE)
 #define PS_USE_SETPROCTITLE
-#elif defined(__linux__) || defined(__sun) || defined(__darwin__)
+#elif defined(__linux__) || defined(_AIX) || defined(__sun) || defined(__darwin__)
 #define PS_USE_CLOBBER_ARGV
 #elif defined(WIN32)
 #define PS_USE_WIN32
@@ -60,7 +62,7 @@ bool		update_process_title = DEFAULT_UPDATE_PROCESS_TITLE;
 
 
 /* Different systems want the buffer padded differently */
-#if defined(__linux__) || defined(__darwin__)
+#if defined(_AIX) || defined(__linux__) || defined(__darwin__)
 #define PS_PADDING '\0'
 #else
 #define PS_PADDING ' '

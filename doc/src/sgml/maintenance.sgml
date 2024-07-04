@@ -656,7 +656,7 @@ SELECT datname, age(datfrozenxid) FROM pg_database;
 
 <programlisting>
 WARNING:  database "mydb" must be vacuumed within 39985967 transactions
-HINT:  To avoid XID assignment failures, execute a database-wide VACUUM in that database.
+HINT:  To avoid a database shutdown, execute a database-wide VACUUM in that database.
 </programlisting>
 
     (A manual <command>VACUUM</command> should fix the problem, as suggested by the
@@ -667,17 +667,16 @@ HINT:  To avoid XID assignment failures, execute a database-wide VACUUM in that 
     there are fewer than three million transactions left until wraparound:
 
 <programlisting>
-ERROR:  database is not accepting commands that assign new XIDs to avoid wraparound data loss in database "mydb"
-HINT:  Execute a database-wide VACUUM in that database.
+ERROR:  database is not accepting commands to avoid wraparound data loss in database "mydb"
+HINT:  Stop the postmaster and vacuum that database in single-user mode.
 </programlisting>
 
     In this condition any transactions already in progress can continue,
     but only read-only transactions can be started. Operations that
     modify database records or truncate relations will fail.
     The <command>VACUUM</command> command can still be run normally.
-    Note that, contrary to what was sometimes recommended in earlier releases,
-    it is not necessary or desirable to stop the postmaster or enter single
-    user-mode in order to restore normal operation.
+    Contrary to what the hint states, it is not necessary or desirable to stop the
+    postmaster or enter single user-mode in order to restore normal operation.
     Instead, follow these steps:
 
     <orderedlist>
@@ -802,7 +801,7 @@ HINT:  Execute a database-wide VACUUM in that database.
     <para>
      Similar to the XID case, if autovacuum fails to clear old MXIDs from a table, the
      system will begin to emit warning messages when the database's oldest MXIDs reach forty
-     million transactions from the wraparound point.  And, just as in the XID case, if these
+     million transactions from the wraparound point.  And, just as an the XID case, if these
      warnings are ignored, the system will refuse to generate new MXIDs once there are fewer
      than three million left until wraparound.
     </para>
@@ -924,9 +923,10 @@ vacuum insert threshold = vacuum base insert threshold + vacuum insert scale fac
     <xref linkend="reloption-autovacuum-freeze-min-age"/> as this may allow
     tuples to be frozen by earlier vacuums.  The number of obsolete tuples and
     the number of inserted tuples are obtained from the cumulative statistics system;
-    it is an eventually-consistent count updated by each <command>UPDATE</command>,
-    <command>DELETE</command> and <command>INSERT</command> operation.
-    If the <structfield>relfrozenxid</structfield> value of the table
+    it is a semi-accurate count updated by each <command>UPDATE</command>,
+    <command>DELETE</command> and <command>INSERT</command> operation.  (It is
+    only semi-accurate because some information might be lost under heavy
+    load.)  If the <structfield>relfrozenxid</structfield> value of the table
     is more than <varname>vacuum_freeze_table_age</varname> transactions old,
     an aggressive vacuum is performed to freeze old tuples and advance
     <structfield>relfrozenxid</structfield>; otherwise, only pages that have been modified

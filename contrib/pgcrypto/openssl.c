@@ -50,8 +50,9 @@
  */
 
 /*
- * To make sure we don't leak OpenSSL handles, we use the ResourceOwner
- * mechanism to free them on abort.
+ * To make sure we don't leak OpenSSL handles on abort, we keep OSSLDigest
+ * objects in a linked list, allocated in TopMemoryContext. We use the
+ * ResourceOwner mechanism to free them on abort.
  */
 typedef struct OSSLDigest
 {
@@ -59,39 +60,54 @@ typedef struct OSSLDigest
 	EVP_MD_CTX *ctx;
 
 	ResourceOwner owner;
+	struct OSSLDigest *next;
+	struct OSSLDigest *prev;
 } OSSLDigest;
 
-/* ResourceOwner callbacks to hold OpenSSL digest handles */
-static void ResOwnerReleaseOSSLDigest(Datum res);
-
-static const ResourceOwnerDesc ossldigest_resowner_desc =
-{
-	.name = "pgcrypto OpenSSL digest handle",
-	.release_phase = RESOURCE_RELEASE_BEFORE_LOCKS,
-	.release_priority = RELEASE_PRIO_FIRST,
-	.ReleaseResource = ResOwnerReleaseOSSLDigest,
-	.DebugPrint = NULL,			/* default message is fine */
-};
-
-/* Convenience wrappers over ResourceOwnerRemember/Forget */
-static inline void
-ResourceOwnerRememberOSSLDigest(ResourceOwner owner, OSSLDigest *digest)
-{
-	ResourceOwnerRemember(owner, PointerGetDatum(digest), &ossldigest_resowner_desc);
-}
-static inline void
-ResourceOwnerForgetOSSLDigest(ResourceOwner owner, OSSLDigest *digest)
-{
-	ResourceOwnerForget(owner, PointerGetDatum(digest), &ossldigest_resowner_desc);
-}
+static OSSLDigest *open_digests = NULL;
+static bool digest_resowner_callback_registered = false;
 
 static void
 free_openssl_digest(OSSLDigest *digest)
 {
 	EVP_MD_CTX_destroy(digest->ctx);
-	if (digest->owner != NULL)
-		ResourceOwnerForgetOSSLDigest(digest->owner, digest);
+	if (digest->prev)
+		digest->prev->next = digest->next;
+	else
+		open_digests = digest->next;
+	if (digest->next)
+		digest->next->prev = digest->prev;
 	pfree(digest);
+}
+
+/*
+ * Close any open OpenSSL handles on abort.
+ */
+static void
+digest_free_callback(ResourceReleasePhase phase,
+					 bool isCommit,
+					 bool isTopLevel,
+					 void *arg)
+{
+	OSSLDigest *curr;
+	OSSLDigest *next;
+
+	if (phase != RESOURCE_RELEASE_AFTER_LOCKS)
+		return;
+
+	next = open_digests;
+	while (next)
+	{
+		curr = next;
+		next = curr->next;
+
+		if (curr->owner == CurrentResourceOwner)
+		{
+			if (isCommit)
+				elog(WARNING, "pgcrypto digest reference leak: digest %p still referenced", curr);
+			free_openssl_digest(curr);
+		}
+	}
 }
 
 static unsigned
@@ -172,11 +188,15 @@ px_find_digest(const char *name, PX_MD **res)
 		OpenSSL_add_all_algorithms();
 	}
 
+	if (!digest_resowner_callback_registered)
+	{
+		RegisterResourceReleaseCallback(digest_free_callback, NULL);
+		digest_resowner_callback_registered = true;
+	}
+
 	md = EVP_get_digestbyname(name);
 	if (md == NULL)
 		return PXE_NO_HASH;
-
-	ResourceOwnerEnlarge(CurrentResourceOwner);
 
 	/*
 	 * Create an OSSLDigest object, an OpenSSL MD object, and a PX_MD object.
@@ -201,7 +221,9 @@ px_find_digest(const char *name, PX_MD **res)
 	digest->algo = md;
 	digest->ctx = ctx;
 	digest->owner = CurrentResourceOwner;
-	ResourceOwnerRememberOSSLDigest(digest->owner, digest);
+	digest->next = open_digests;
+	digest->prev = NULL;
+	open_digests = digest;
 
 	/* The PX_MD object is allocated in the current memory context. */
 	h = palloc(sizeof(*h));
@@ -215,17 +237,6 @@ px_find_digest(const char *name, PX_MD **res)
 
 	*res = h;
 	return 0;
-}
-
-/* ResourceOwner callbacks for OSSLDigest */
-
-static void
-ResOwnerReleaseOSSLDigest(Datum res)
-{
-	OSSLDigest *digest = (OSSLDigest *) DatumGetPointer(res);
-
-	digest->owner = NULL;
-	free_openssl_digest(digest);
 }
 
 /*
@@ -255,8 +266,9 @@ struct ossl_cipher
  * OSSLCipher contains the state for using a cipher. A separate OSSLCipher
  * object is allocated in each px_find_cipher() call.
  *
- * To make sure we don't leak OpenSSL handles, we use the ResourceOwner
- * mechanism to free them on abort.
+ * To make sure we don't leak OpenSSL handles on abort, we keep OSSLCipher
+ * objects in a linked list, allocated in TopMemoryContext. We use the
+ * ResourceOwner mechanism to free them on abort.
  */
 typedef struct OSSLCipher
 {
@@ -269,39 +281,54 @@ typedef struct OSSLCipher
 	const struct ossl_cipher *ciph;
 
 	ResourceOwner owner;
+	struct OSSLCipher *next;
+	struct OSSLCipher *prev;
 } OSSLCipher;
 
-/* ResourceOwner callbacks to hold OpenSSL cipher state */
-static void ResOwnerReleaseOSSLCipher(Datum res);
-
-static const ResourceOwnerDesc osslcipher_resowner_desc =
-{
-	.name = "pgcrypto OpenSSL cipher handle",
-	.release_phase = RESOURCE_RELEASE_BEFORE_LOCKS,
-	.release_priority = RELEASE_PRIO_FIRST,
-	.ReleaseResource = ResOwnerReleaseOSSLCipher,
-	.DebugPrint = NULL,			/* default message is fine */
-};
-
-/* Convenience wrappers over ResourceOwnerRemember/Forget */
-static inline void
-ResourceOwnerRememberOSSLCipher(ResourceOwner owner, OSSLCipher *od)
-{
-	ResourceOwnerRemember(owner, PointerGetDatum(od), &osslcipher_resowner_desc);
-}
-static inline void
-ResourceOwnerForgetOSSLCipher(ResourceOwner owner, OSSLCipher *od)
-{
-	ResourceOwnerForget(owner, PointerGetDatum(od), &osslcipher_resowner_desc);
-}
+static OSSLCipher *open_ciphers = NULL;
+static bool cipher_resowner_callback_registered = false;
 
 static void
 free_openssl_cipher(OSSLCipher *od)
 {
 	EVP_CIPHER_CTX_free(od->evp_ctx);
-	if (od->owner != NULL)
-		ResourceOwnerForgetOSSLCipher(od->owner, od);
+	if (od->prev)
+		od->prev->next = od->next;
+	else
+		open_ciphers = od->next;
+	if (od->next)
+		od->next->prev = od->prev;
 	pfree(od);
+}
+
+/*
+ * Close any open OpenSSL cipher handles on abort.
+ */
+static void
+cipher_free_callback(ResourceReleasePhase phase,
+					 bool isCommit,
+					 bool isTopLevel,
+					 void *arg)
+{
+	OSSLCipher *curr;
+	OSSLCipher *next;
+
+	if (phase != RESOURCE_RELEASE_AFTER_LOCKS)
+		return;
+
+	next = open_ciphers;
+	while (next)
+	{
+		curr = next;
+		next = curr->next;
+
+		if (curr->owner == CurrentResourceOwner)
+		{
+			if (isCommit)
+				elog(WARNING, "pgcrypto cipher reference leak: cipher %p still referenced", curr);
+			free_openssl_cipher(curr);
+		}
+	}
 }
 
 /* Common routines for all algorithms */
@@ -460,7 +487,7 @@ bf_init(PX_Cipher *c, const uint8 *key, unsigned klen, const uint8 *iv)
 
 	/*
 	 * Test if key len is supported. BF_set_key silently cut large keys and it
-	 * could be a problem when user transfer encrypted data from one server to
+	 * could be a problem when user transfer crypted data from one server to
 	 * another.
 	 */
 
@@ -755,7 +782,11 @@ px_find_cipher(const char *name, PX_Cipher **res)
 	if (i->name == NULL)
 		return PXE_NO_CIPHER;
 
-	ResourceOwnerEnlarge(CurrentResourceOwner);
+	if (!cipher_resowner_callback_registered)
+	{
+		RegisterResourceReleaseCallback(cipher_free_callback, NULL);
+		cipher_resowner_callback_registered = true;
+	}
 
 	/*
 	 * Create an OSSLCipher object, an EVP_CIPHER_CTX object and a PX_Cipher.
@@ -775,7 +806,9 @@ px_find_cipher(const char *name, PX_Cipher **res)
 
 	od->evp_ctx = ctx;
 	od->owner = CurrentResourceOwner;
-	ResourceOwnerRememberOSSLCipher(od->owner, od);
+	od->next = open_ciphers;
+	od->prev = NULL;
+	open_ciphers = od;
 
 	if (i->ciph->cipher_func)
 		od->evp_ciph = i->ciph->cipher_func();
@@ -793,12 +826,4 @@ px_find_cipher(const char *name, PX_Cipher **res)
 
 	*res = c;
 	return 0;
-}
-
-/* ResourceOwner callbacks for OSSLCipher */
-
-static void
-ResOwnerReleaseOSSLCipher(Datum res)
-{
-	free_openssl_cipher((OSSLCipher *) DatumGetPointer(res));
 }

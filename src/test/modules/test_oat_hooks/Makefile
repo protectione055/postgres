@@ -6,7 +6,7 @@ OBJS = \
 	test_oat_hooks.o
 PGFILEDESC = "test_oat_hooks - example use of object access hooks"
 
-REGRESS = test_oat_hooks alter_table
+REGRESS = test_oat_hooks
 
 # disable installcheck for now
 NO_INSTALLCHECK = 1

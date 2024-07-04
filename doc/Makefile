@@ -12,5 +12,5 @@ subdir = doc
 top_builddir = ..
 include $(top_builddir)/src/Makefile.global
 
-all html man install installdirs uninstall clean distclean:
+all distprep html man install installdirs uninstall clean distclean maintainer-clean:
 	$(MAKE) -C src $@

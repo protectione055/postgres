@@ -6,7 +6,7 @@
  * Generic code supporting statistics objects created via CREATE STATISTICS.
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -21,13 +21,15 @@
 #include "access/htup_details.h"
 #include "access/table.h"
 #include "catalog/indexing.h"
+#include "catalog/pg_collation.h"
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_statistic_ext_data.h"
+#include "executor/executor.h"
 #include "commands/defrem.h"
 #include "commands/progress.h"
-#include "executor/executor.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
 #include "parser/parsetree.h"
 #include "pgstat.h"
@@ -45,6 +47,7 @@
 #include "utils/rel.h"
 #include "utils/selfuncs.h"
 #include "utils/syscache.h"
+#include "utils/typcache.h"
 
 /*
  * To avoid consuming too much memory during analysis and/or too much space
@@ -170,7 +173,7 @@ BuildRelationExtStatistics(Relation onerel, bool inh, double totalrows,
 									  natts, vacattrstats);
 		if (!stats)
 		{
-			if (!AmAutoVacuumWorkerProcess())
+			if (!IsAutoVacuumWorkerProcess())
 				ereport(WARNING,
 						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
 						 errmsg("statistics object \"%s.%s\" could not be computed for relation \"%s.%s\"",
@@ -363,8 +366,8 @@ statext_compute_stattarget(int stattarget, int nattrs, VacAttrStats **stats)
 	for (i = 0; i < nattrs; i++)
 	{
 		/* keep the maximum statistics target */
-		if (stats[i]->attstattarget > stattarget)
-			stattarget = stats[i]->attstattarget;
+		if (stats[i]->attr->attstattarget > stattarget)
+			stattarget = stats[i]->attr->attstattarget;
 	}
 
 	/*
@@ -376,7 +379,7 @@ statext_compute_stattarget(int stattarget, int nattrs, VacAttrStats **stats)
 		stattarget = default_statistics_target;
 
 	/* As this point we should have a valid statistics target. */
-	Assert((stattarget >= 0) && (stattarget <= MAX_STATISTICS_TARGET));
+	Assert((stattarget >= 0) && (stattarget <= 10000));
 
 	return stattarget;
 }
@@ -454,14 +457,12 @@ fetch_statentries_for_relation(Relation pg_statext, Oid relid)
 		entry->statOid = staForm->oid;
 		entry->schema = get_namespace_name(staForm->stxnamespace);
 		entry->name = pstrdup(NameStr(staForm->stxname));
+		entry->stattarget = staForm->stxstattarget;
 		for (i = 0; i < staForm->stxkeys.dim1; i++)
 		{
 			entry->columns = bms_add_member(entry->columns,
 											staForm->stxkeys.values[i]);
 		}
-
-		datum = SysCacheGetAttr(STATEXTOID, htup, Anum_pg_statistic_ext_stxstattarget, &isnull);
-		entry->stattarget = isnull ? -1 : DatumGetInt16(datum);
 
 		/* decode the stxkind char array into a list of chars */
 		datum = SysCacheGetAttrNotNull(STATEXTOID, htup,
@@ -533,10 +534,14 @@ examine_attribute(Node *expr)
 	bool		ok;
 
 	/*
-	 * Create the VacAttrStats struct.
+	 * Create the VacAttrStats struct.  Note that we only have a copy of the
+	 * fixed fields of the pg_attribute tuple.
 	 */
 	stats = (VacAttrStats *) palloc0(sizeof(VacAttrStats));
-	stats->attstattarget = -1;
+
+	/* fake the attribute */
+	stats->attr = (Form_pg_attribute) palloc0(ATTRIBUTE_FIXED_PART_SIZE);
+	stats->attr->attstattarget = -1;
 
 	/*
 	 * When analyzing an expression, believe the expression tree's type not
@@ -590,6 +595,7 @@ examine_attribute(Node *expr)
 	if (!ok || stats->compute_stats == NULL || stats->minrows <= 0)
 	{
 		heap_freetuple(typtuple);
+		pfree(stats->attr);
 		pfree(stats);
 		return NULL;
 	}
@@ -619,13 +625,6 @@ examine_expression(Node *expr, int stattarget)
 	stats = (VacAttrStats *) palloc0(sizeof(VacAttrStats));
 
 	/*
-	 * We can't have statistics target specified for the expression, so we
-	 * could use either the default_statistics_target, or the target computed
-	 * for the extended statistics. The second option seems more reasonable.
-	 */
-	stats->attstattarget = stattarget;
-
-	/*
 	 * When analyzing an expression, believe the expression tree's type.
 	 */
 	stats->attrtypid = exprType(expr);
@@ -638,6 +637,25 @@ examine_expression(Node *expr, int stattarget)
 	 * which case exprCollation() does the right thing.
 	 */
 	stats->attrcollid = exprCollation(expr);
+
+	/*
+	 * We don't have any pg_attribute for expressions, so let's fake something
+	 * reasonable into attstattarget, which is the only thing std_typanalyze
+	 * needs.
+	 */
+	stats->attr = (Form_pg_attribute) palloc(ATTRIBUTE_FIXED_PART_SIZE);
+
+	/*
+	 * We can't have statistics target specified for the expression, so we
+	 * could use either the default_statistics_target, or the target computed
+	 * for the extended statistics. The second option seems more reasonable.
+	 */
+	stats->attr->attstattarget = stattarget;
+
+	/* initialize some basic fields */
+	stats->attr->attrelid = InvalidOid;
+	stats->attr->attnum = InvalidAttrNumber;
+	stats->attr->atttypid = stats->attrtypid;
 
 	typtuple = SearchSysCacheCopy1(TYPEOID,
 								   ObjectIdGetDatum(stats->attrtypid));
@@ -728,6 +746,12 @@ lookup_var_attr_stats(Relation rel, Bitmapset *attrs, List *exprs,
 			pfree(stats);
 			return NULL;
 		}
+
+		/*
+		 * Sanity check that the column is not dropped - stats should have
+		 * been removed in this case.
+		 */
+		Assert(!stats[i]->attr->attisdropped);
 
 		i++;
 	}
@@ -2213,7 +2237,8 @@ compute_expr_stats(Relation onerel, double totalrows,
 		if (tcnt > 0)
 		{
 			AttributeOpts *aopt =
-				get_attribute_options(onerel->rd_id, stats->tupattnum);
+				get_attribute_options(stats->attr->attrelid,
+									  stats->attr->attnum);
 
 			stats->exprvals = exprvals;
 			stats->exprnulls = exprnulls;
@@ -2236,7 +2261,7 @@ compute_expr_stats(Relation onerel, double totalrows,
 
 		ExecDropSingleTupleTableSlot(slot);
 		FreeExecutorState(estate);
-		MemoryContextReset(expr_context);
+		MemoryContextResetAndDeleteChildren(expr_context);
 	}
 
 	MemoryContextSwitchTo(old_context);

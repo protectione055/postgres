@@ -171,7 +171,7 @@ all: all-po
 install: install-po
 installdirs: installdirs-po
 uninstall: uninstall-po
-clean distclean: clean-po
+clean distclean maintainer-clean: clean-po
 
 .PHONY: all-po install-po installdirs-po uninstall-po clean-po \
         init-po update-po

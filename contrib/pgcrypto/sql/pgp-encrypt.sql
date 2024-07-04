@@ -64,6 +64,9 @@ select pgp_sym_decrypt(
 
 -- s2k digest change
 select pgp_sym_decrypt(
+	pgp_sym_encrypt('Secret.', 'key', 's2k-digest-algo=md5'),
+	'key', 'expect-s2k-digest-algo=md5');
+select pgp_sym_decrypt(
 		pgp_sym_encrypt('Secret.', 'key', 's2k-digest-algo=sha1'),
 	'key', 'expect-s2k-digest-algo=sha1');
 

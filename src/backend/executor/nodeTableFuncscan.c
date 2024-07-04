@@ -3,7 +3,7 @@
  * nodeTableFuncscan.c
  *	  Support routines for scanning RangeTableFunc (XMLTABLE like functions).
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -28,7 +28,6 @@
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "utils/builtins.h"
-#include "utils/jsonpath.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/xml.h"
@@ -162,9 +161,8 @@ ExecInitTableFuncScan(TableFuncScan *node, EState *estate, int eflags)
 	scanstate->ss.ps.qual =
 		ExecInitQual(node->scan.plan.qual, &scanstate->ss.ps);
 
-	/* Only XMLTABLE and JSON_TABLE are supported currently */
-	scanstate->routine =
-		tf->functype == TFT_XMLTABLE ? &XmlTableRoutine : &JsonbTableRoutine;
+	/* Only XMLTABLE is supported currently */
+	scanstate->routine = &XmlTableRoutine;
 
 	scanstate->perTableCxt =
 		AllocSetContextCreate(CurrentMemoryContext,
@@ -184,10 +182,6 @@ ExecInitTableFuncScan(TableFuncScan *node, EState *estate, int eflags)
 		ExecInitExprList(tf->colexprs, (PlanState *) scanstate);
 	scanstate->coldefexprs =
 		ExecInitExprList(tf->coldefexprs, (PlanState *) scanstate);
-	scanstate->colvalexprs =
-		ExecInitExprList(tf->colvalexprs, (PlanState *) scanstate);
-	scanstate->passingvalexprs =
-		ExecInitExprList(tf->passingvalexprs, (PlanState *) scanstate);
 
 	scanstate->notnulls = tf->notnulls;
 
@@ -219,6 +213,18 @@ ExecInitTableFuncScan(TableFuncScan *node, EState *estate, int eflags)
 void
 ExecEndTableFuncScan(TableFuncScanState *node)
 {
+	/*
+	 * Free the exprcontext
+	 */
+	ExecFreeExprContext(&node->ss.ps);
+
+	/*
+	 * clean out the tuple table
+	 */
+	if (node->ss.ps.ps_ResultTupleSlot)
+		ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
+	ExecClearTuple(node->ss.ss_ScanTupleSlot);
+
 	/*
 	 * Release tuplestore resources
 	 */
@@ -280,12 +286,11 @@ tfuncFetchRows(TableFuncScanState *tstate, ExprContext *econtext)
 
 	/*
 	 * Each call to fetch a new set of rows - of which there may be very many
-	 * if XMLTABLE or JSON_TABLE is being used in a lateral join - will
-	 * allocate a possibly substantial amount of memory, so we cannot use the
-	 * per-query context here. perTableCxt now serves the same function as
-	 * "argcontext" does in FunctionScan - a place to store per-one-call (i.e.
-	 * one result table) lifetime data (as opposed to per-query or
-	 * per-result-tuple).
+	 * if XMLTABLE is being used in a lateral join - will allocate a possibly
+	 * substantial amount of memory, so we cannot use the per-query context
+	 * here. perTableCxt now serves the same function as "argcontext" does in
+	 * FunctionScan - a place to store per-one-call (i.e. one result table)
+	 * lifetime data (as opposed to per-query or per-result-tuple).
 	 */
 	MemoryContextSwitchTo(tstate->perTableCxt);
 
@@ -376,20 +381,14 @@ tfuncInitialize(TableFuncScanState *tstate, ExprContext *econtext, Datum doc)
 		routine->SetNamespace(tstate, ns_name, ns_uri);
 	}
 
-	/*
-	 * Install the row filter expression, if any, into the table builder
-	 * context.
-	 */
-	if (routine->SetRowFilter)
-	{
-		value = ExecEvalExpr(tstate->rowexpr, econtext, &isnull);
-		if (isnull)
-			ereport(ERROR,
-					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-					 errmsg("row filter expression must not be null")));
+	/* Install the row filter expression into the table builder context */
+	value = ExecEvalExpr(tstate->rowexpr, econtext, &isnull);
+	if (isnull)
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("row filter expression must not be null")));
 
-		routine->SetRowFilter(tstate, TextDatumGetCString(value));
-	}
+	routine->SetRowFilter(tstate, TextDatumGetCString(value));
 
 	/*
 	 * Install the column filter expressions into the table builder context.

@@ -3,7 +3,7 @@
  * arrayutils.c
  *	  This file contains some support routines required for array functions.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -41,6 +41,21 @@ ArrayGetOffset(int n, const int *dim, const int *lb, const int *indx)
 		scale *= dim[i];
 	}
 	return offset;
+}
+
+/*
+ * Same, but subscripts are assumed 0-based, and use a scale array
+ * instead of raw dimension data (see mda_get_prod to create scale array)
+ */
+int
+ArrayGetOffset0(int n, const int *tup, const int *scale)
+{
+	int			i,
+				lin = 0;
+
+	for (i = 0; i < n; i++)
+		lin += tup[i] * scale[i];
+	return lin;
 }
 
 /*

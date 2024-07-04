@@ -1,5 +1,5 @@
 
-# Copyright (c) 2021-2024, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 # A simple 'tee' implementation, using perl tie.
 #
@@ -17,7 +17,7 @@
 
 package PostgreSQL::Test::SimpleTee;
 use strict;
-use warnings FATAL => 'all';
+use warnings;
 
 use Time::HiRes qw(time);
 

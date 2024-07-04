@@ -1,8 +1,8 @@
 
-# Copyright (c) 2021-2024, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 use strict;
-use warnings FATAL => 'all';
+use warnings;
 
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
@@ -104,86 +104,6 @@ else
 		[ 'createdb', '-T', 'template0', '--locale-provider=icu', 'foobar4' ],
 		'create database with ICU fails since no ICU support');
 }
-
-$node->command_fails(
-	[
-		'createdb', '-T',
-		'template0', '--locale-provider=builtin',
-		'tbuiltin1'
-	],
-	'create database with provider "builtin" fails without --locale');
-
-$node->command_ok(
-	[
-		'createdb', '-T',
-		'template0', '--locale-provider=builtin',
-		'--locale=C', 'tbuiltin2'
-	],
-	'create database with provider "builtin" and locale "C"');
-
-$node->command_ok(
-	[
-		'createdb', '-T',
-		'template0', '--locale-provider=builtin',
-		'--locale=C', '--lc-collate=C',
-		'tbuiltin3'
-	],
-	'create database with provider "builtin" and LC_COLLATE=C');
-
-$node->command_ok(
-	[
-		'createdb', '-T',
-		'template0', '--locale-provider=builtin',
-		'--locale=C', '--lc-ctype=C',
-		'tbuiltin4'
-	],
-	'create database with provider "builtin" and LC_CTYPE=C');
-
-$node->command_ok(
-	[
-		'createdb', '-T',
-		'template0', '--locale-provider=builtin',
-		'--lc-collate=C', '--lc-ctype=C',
-		'-E UTF-8', '--builtin-locale=C.UTF8',
-		'tbuiltin5'
-	],
-	'create database with --builtin-locale C.UTF-8 and -E UTF-8');
-
-$node->command_fails(
-	[
-		'createdb', '-T',
-		'template0', '--locale-provider=builtin',
-		'--lc-collate=C', '--lc-ctype=C',
-		'-E LATIN1', '--builtin-locale=C.UTF-8',
-		'tbuiltin6'
-	],
-	'create database with --builtin-locale C.UTF-8 and -E LATIN1');
-
-$node->command_fails(
-	[
-		'createdb', '-T',
-		'template0', '--locale-provider=builtin',
-		'--locale=C', '--icu-locale=en',
-		'tbuiltin7'
-	],
-	'create database with provider "builtin" and ICU_LOCALE="en"');
-
-$node->command_fails(
-	[
-		'createdb', '-T',
-		'template0', '--locale-provider=builtin',
-		'--locale=C', '--icu-rules=""',
-		'tbuiltin8'
-	],
-	'create database with provider "builtin" and ICU_RULES=""');
-
-$node->command_fails(
-	[
-		'createdb', '-T',
-		'template1', '--locale-provider=builtin',
-		'--locale=C', 'tbuiltin9'
-	],
-	'create database with provider "builtin" not matching template');
 
 $node->command_fails([ 'createdb', 'foobar1' ],
 	'fails if database already exists');

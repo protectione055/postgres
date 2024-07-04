@@ -3,7 +3,7 @@
  * cmdtag.c
  *	  Data and routines for commandtag names and enumeration.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -13,6 +13,7 @@
  */
 #include "postgres.h"
 
+#include "miscadmin.h"
 #include "tcop/cmdtag.h"
 #include "utils/builtins.h"
 
@@ -30,7 +31,7 @@ typedef struct CommandTagBehavior
 #define PG_CMDTAG(tag, name, evtrgok, rwrok, rowcnt) \
 	{ name, (uint8) (sizeof(name) - 1), evtrgok, rwrok, rowcnt },
 
-static const CommandTagBehavior tag_behavior[] = {
+static const CommandTagBehavior tag_behavior[COMMAND_TAG_NEXTTAG] = {
 #include "tcop/cmdtaglist.h"
 };
 

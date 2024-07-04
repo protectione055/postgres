@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, PostgreSQL Global Development Group
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
 
 test_worker_spi_sources = files(
   'worker_spi.c',
@@ -25,9 +25,12 @@ tests += {
   'name': 'worker_spi',
   'sd': meson.current_source_dir(),
   'bd': meson.current_build_dir(),
-  'tap': {
-    'tests': [
-      't/001_worker_spi.pl',
+  'regress': {
+    'sql': [
+      'worker_spi',
     ],
+    'dbname': 'contrib_regression',
+    'regress_args': ['--temp-config', files('dynamic.conf')],
+    'runningcheck': false,
   },
 }

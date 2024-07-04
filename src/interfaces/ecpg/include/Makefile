@@ -31,5 +31,5 @@ uninstall:
 	rm -f $(addprefix '$(DESTDIR)$(informix_esql_dir)'/, $(informix_headers))
 	rm -f '$(DESTDIR)$(includedir)'/$(notdir $(ecpg_config_h))
 
-distclean:
+distclean maintainer-clean:
 	rm -f ecpg_config.h stamp-h

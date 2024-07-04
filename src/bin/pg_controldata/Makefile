@@ -2,7 +2,7 @@
 #
 # Makefile for src/bin/pg_controldata
 #
-# Copyright (c) 1998-2024, PostgreSQL Global Development Group
+# Copyright (c) 1998-2023, PostgreSQL Global Development Group
 #
 # src/bin/pg_controldata/Makefile
 #
@@ -33,7 +33,7 @@ installdirs:
 uninstall:
 	rm -f '$(DESTDIR)$(bindir)/pg_controldata$(X)'
 
-clean distclean:
+clean distclean maintainer-clean:
 	rm -f pg_controldata$(X) $(OBJS)
 	rm -rf tmp_check
 

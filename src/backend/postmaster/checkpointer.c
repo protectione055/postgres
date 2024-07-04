@@ -23,7 +23,7 @@
  * restart needs to be forced.)
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -42,7 +42,6 @@
 #include "libpq/pqsignal.h"
 #include "miscadmin.h"
 #include "pgstat.h"
-#include "postmaster/auxprocess.h"
 #include "postmaster/bgwriter.h"
 #include "postmaster/interrupt.h"
 #include "replication/syncrep.h"
@@ -92,11 +91,17 @@
  * requesting backends since the last checkpoint start.  The flags are
  * chosen so that OR'ing is the correct way to combine multiple requests.
  *
+ * num_backend_writes is used to count the number of buffer writes performed
+ * by user backend processes.  This counter should be wide enough that it
+ * can't overflow during a single processing cycle.  num_backend_fsync
+ * counts the subset of those writes that also had to do their own fsync,
+ * because the checkpointer failed to absorb their request.
+ *
  * The requests array holds fsync requests sent by backends and not yet
  * absorbed by the checkpointer.
  *
- * Unlike the checkpoint fields, requests related fields are protected by
- * CheckpointerCommLock.
+ * Unlike the checkpoint fields, num_backend_writes, num_backend_fsync, and
+ * the requests fields are protected by CheckpointerCommLock.
  *----------
  */
 typedef struct
@@ -119,6 +124,9 @@ typedef struct
 
 	ConditionVariable start_cv; /* signaled when ckpt_started advances */
 	ConditionVariable done_cv;	/* signaled when ckpt_done advances */
+
+	uint32		num_backend_writes; /* counts user backend buffer writes */
+	uint32		num_backend_fsync;	/* counts user backend fsync calls */
 
 	int			num_requests;	/* current # of requests */
 	int			max_requests;	/* allocated array size */
@@ -170,15 +178,10 @@ static void ReqCheckpointHandler(SIGNAL_ARGS);
  * basic execution environment, but not enabled signals yet.
  */
 void
-CheckpointerMain(char *startup_data, size_t startup_data_len)
+CheckpointerMain(void)
 {
 	sigjmp_buf	local_sigjmp_buf;
 	MemoryContext checkpointer_context;
-
-	Assert(startup_data_len == 0);
-
-	MyBackendType = B_CHECKPOINTER;
-	AuxiliaryProcessMainCommon();
 
 	CheckpointerShmem->checkpointer_pid = MyProcPid;
 
@@ -296,7 +299,7 @@ CheckpointerMain(char *startup_data, size_t startup_data_len)
 		FlushErrorState();
 
 		/* Flush any leaked data in the top-level context */
-		MemoryContextReset(checkpointer_context);
+		MemoryContextResetAndDeleteChildren(checkpointer_context);
 
 		/* Now we can allow interrupts again */
 		RESUME_INTERRUPTS();
@@ -307,6 +310,13 @@ CheckpointerMain(char *startup_data, size_t startup_data_len)
 		 * fast as we can.
 		 */
 		pg_usleep(1000000L);
+
+		/*
+		 * Close all open files after any error.  This is helpful on Windows,
+		 * where holding deleted files open causes various strange errors.
+		 * It's not clear we need it elsewhere, but shouldn't hurt.
+		 */
+		smgrcloseall();
 	}
 
 	/* We can now handle ereport(ERROR) */
@@ -339,8 +349,6 @@ CheckpointerMain(char *startup_data, size_t startup_data_len)
 		pg_time_t	now;
 		int			elapsed_secs;
 		int			cur_timeout;
-		bool		chkpt_or_rstpt_requested = false;
-		bool		chkpt_or_rstpt_timed = false;
 
 		/* Clear any already-pending wakeups */
 		ResetLatch(MyLatch);
@@ -359,7 +367,7 @@ CheckpointerMain(char *startup_data, size_t startup_data_len)
 		if (((volatile CheckpointerShmemStruct *) CheckpointerShmem)->ckpt_flags)
 		{
 			do_checkpoint = true;
-			chkpt_or_rstpt_requested = true;
+			PendingCheckpointerStats.requested_checkpoints++;
 		}
 
 		/*
@@ -373,7 +381,7 @@ CheckpointerMain(char *startup_data, size_t startup_data_len)
 		if (elapsed_secs >= CheckPointTimeout)
 		{
 			if (!do_checkpoint)
-				chkpt_or_rstpt_timed = true;
+				PendingCheckpointerStats.timed_checkpoints++;
 			do_checkpoint = true;
 			flags |= CHECKPOINT_CAUSE_TIME;
 		}
@@ -409,24 +417,6 @@ CheckpointerMain(char *startup_data, size_t startup_data_len)
 			if (flags & CHECKPOINT_END_OF_RECOVERY)
 				do_restartpoint = false;
 
-			if (chkpt_or_rstpt_timed)
-			{
-				chkpt_or_rstpt_timed = false;
-				if (do_restartpoint)
-					PendingCheckpointerStats.restartpoints_timed++;
-				else
-					PendingCheckpointerStats.num_timed++;
-			}
-
-			if (chkpt_or_rstpt_requested)
-			{
-				chkpt_or_rstpt_requested = false;
-				if (do_restartpoint)
-					PendingCheckpointerStats.restartpoints_requested++;
-				else
-					PendingCheckpointerStats.num_requested++;
-			}
-
 			/*
 			 * We will warn if (a) too soon since last checkpoint (whatever
 			 * caused it) and (b) somebody set the CHECKPOINT_CAUSE_XLOG flag
@@ -442,7 +432,7 @@ CheckpointerMain(char *startup_data, size_t startup_data_len)
 									   "checkpoints are occurring too frequently (%d seconds apart)",
 									   elapsed_secs,
 									   elapsed_secs),
-						 errhint("Consider increasing the configuration parameter \"%s\".", "max_wal_size")));
+						 errhint("Consider increasing the configuration parameter \"max_wal_size\".")));
 
 			/*
 			 * Initialize checkpointer-private variables used during
@@ -468,12 +458,10 @@ CheckpointerMain(char *startup_data, size_t startup_data_len)
 				ckpt_performed = CreateRestartPoint(flags);
 
 			/*
-			 * After any checkpoint, free all smgr objects.  Otherwise we
-			 * would never do so for dropped relations, as the checkpointer
-			 * does not process shared invalidation messages or call
-			 * AtEOXact_SMgr().
+			 * After any checkpoint, close all smgr files.  This is so we
+			 * won't hang onto smgr references to deleted files indefinitely.
 			 */
-			smgrdestroyall();
+			smgrcloseall();
 
 			/*
 			 * Indicate checkpoint completion to any waiting backends.
@@ -492,9 +480,6 @@ CheckpointerMain(char *startup_data, size_t startup_data_len)
 				 * checkpoints happen at a predictable spacing.
 				 */
 				last_checkpoint_time = now;
-
-				if (do_restartpoint)
-					PendingCheckpointerStats.restartpoints_performed++;
 			}
 			else
 			{
@@ -593,7 +578,7 @@ HandleCheckpointerInterrupts(void)
 		 * updates the statistics, increment the checkpoint request and flush
 		 * out pending statistic.
 		 */
-		PendingCheckpointerStats.num_requested++;
+		PendingCheckpointerStats.requested_checkpoints++;
 		ShutdownXLOG(0, 0);
 		pgstat_report_checkpointer();
 		pgstat_report_wal(true);
@@ -858,11 +843,15 @@ IsCheckpointOnSchedule(double progress)
 static void
 ReqCheckpointHandler(SIGNAL_ARGS)
 {
+	int			save_errno = errno;
+
 	/*
 	 * The signaling process should have set ckpt_flags nonzero, so all we
 	 * need do is ensure that our main loop gets kicked out of any wait.
 	 */
 	SetLatch(MyLatch);
+
+	errno = save_errno;
 }
 
 
@@ -955,8 +944,11 @@ RequestCheckpoint(int flags)
 		 */
 		CreateCheckPoint(flags | CHECKPOINT_IMMEDIATE);
 
-		/* Free all smgr objects, as CheckpointerMain() normally would. */
-		smgrdestroyall();
+		/*
+		 * After any checkpoint, close all smgr files.  This is so we won't
+		 * hang onto smgr references to deleted files indefinitely.
+		 */
+		smgrcloseall();
 
 		return;
 	}
@@ -1103,6 +1095,10 @@ ForwardSyncRequest(const FileTag *ftag, SyncRequestType type)
 
 	LWLockAcquire(CheckpointerCommLock, LW_EXCLUSIVE);
 
+	/* Count all backend writes regardless of if they fit in the queue */
+	if (!AmBackgroundWriterProcess())
+		CheckpointerShmem->num_backend_writes++;
+
 	/*
 	 * If the checkpointer isn't running or the request queue is full, the
 	 * backend will have to perform its own fsync request.  But before forcing
@@ -1112,6 +1108,12 @@ ForwardSyncRequest(const FileTag *ftag, SyncRequestType type)
 		(CheckpointerShmem->num_requests >= CheckpointerShmem->max_requests &&
 		 !CompactCheckpointerRequestQueue()))
 	{
+		/*
+		 * Count the subset of writes where backends have to do their own
+		 * fsync
+		 */
+		if (!AmBackgroundWriterProcess())
+			CheckpointerShmem->num_backend_fsync++;
 		LWLockRelease(CheckpointerCommLock);
 		return false;
 	}
@@ -1168,10 +1170,6 @@ CompactCheckpointerRequestQueue(void)
 
 	/* must hold CheckpointerCommLock in exclusive mode */
 	Assert(LWLockHeldByMe(CheckpointerCommLock));
-
-	/* Avoid memory allocations in a critical section. */
-	if (CritSectionCount > 0)
-		return false;
 
 	/* Initialize skip_slot array */
 	skip_slot = palloc0(sizeof(bool) * CheckpointerShmem->num_requests);
@@ -1271,6 +1269,15 @@ AbsorbSyncRequests(void)
 		return;
 
 	LWLockAcquire(CheckpointerCommLock, LW_EXCLUSIVE);
+
+	/* Transfer stats counts into pending pgstats message */
+	PendingCheckpointerStats.buf_written_backend
+		+= CheckpointerShmem->num_backend_writes;
+	PendingCheckpointerStats.buf_fsync_backend
+		+= CheckpointerShmem->num_backend_fsync;
+
+	CheckpointerShmem->num_backend_writes = 0;
+	CheckpointerShmem->num_backend_fsync = 0;
 
 	/*
 	 * We try to avoid holding the lock for a long time by copying the request

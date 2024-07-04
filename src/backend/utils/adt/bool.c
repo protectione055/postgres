@@ -3,7 +3,7 @@
  * bool.c
  *	  Functions for the built-in type "bool".
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -35,7 +35,6 @@ parse_bool(const char *value, bool *result)
 bool
 parse_bool_with_len(const char *value, size_t len, bool *result)
 {
-	/* Check the most-used possibilities first. */
 	switch (*value)
 	{
 		case 't':
@@ -120,7 +119,12 @@ parse_bool_with_len(const char *value, size_t len, bool *result)
  *****************************************************************************/
 
 /*
- *		boolin			- input function for type boolean
+ *		boolin			- converts "t" or "f" to 1 or 0
+ *
+ * Check explicitly for "true/false" and TRUE/FALSE, 1/0, YES/NO, ON/OFF.
+ * Reject other values.
+ *
+ * In the switch statement, check the most-used possibilities first.
  */
 Datum
 boolin(PG_FUNCTION_ARGS)

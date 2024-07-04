@@ -86,7 +86,7 @@
  *	when using the SysV semaphore code.
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	  src/include/storage/s_lock.h
@@ -414,6 +414,12 @@ typedef unsigned int slock_t;
  * an isync is a sufficient synchronization barrier after a lwarx/stwcx loop.
  * But if the spinlock is in ordinary memory, we can use lwsync instead for
  * better performance.
+ *
+ * Ordinarily, we'd code the branches here using GNU-style local symbols, that
+ * is "1f" referencing "1:" and so on.  But some people run gcc on AIX with
+ * IBM's assembler as backend, and IBM's assembler doesn't do local symbols.
+ * So hand-code the branch offsets; fortunately, all PPC instructions are
+ * exactly 4 bytes each, so it's not too hard to count.
  */
 static __inline__ int
 tas(volatile slock_t *lock)
@@ -424,17 +430,15 @@ tas(volatile slock_t *lock)
 	__asm__ __volatile__(
 "	lwarx   %0,0,%3,1	\n"
 "	cmpwi   %0,0		\n"
-"	bne     1f			\n"
+"	bne     $+16		\n"		/* branch to li %1,1 */
 "	addi    %0,%0,1		\n"
 "	stwcx.  %0,0,%3		\n"
-"	beq     2f			\n"
-"1: \n"
+"	beq     $+12		\n"		/* branch to lwsync */
 "	li      %1,1		\n"
-"	b       3f			\n"
-"2: \n"
+"	b       $+12		\n"		/* branch to end of asm sequence */
 "	lwsync				\n"
 "	li      %1,0		\n"
-"3: \n"
+
 :	"=&b"(_t), "=r"(_res), "+m"(*lock)
 :	"r"(lock)
 :	"memory", "cc");
@@ -526,6 +530,71 @@ do \
 #endif /* __mips__ && !__sgi */
 
 
+#if defined(__hppa) || defined(__hppa__)	/* HP PA-RISC */
+/*
+ * HP's PA-RISC
+ *
+ * Because LDCWX requires a 16-byte-aligned address, we declare slock_t as a
+ * 16-byte struct.  The active word in the struct is whichever has the aligned
+ * address; the other three words just sit at -1.
+ */
+#define HAS_TEST_AND_SET
+
+typedef struct
+{
+	int			sema[4];
+} slock_t;
+
+#define TAS_ACTIVE_WORD(lock)	((volatile int *) (((uintptr_t) (lock) + 15) & ~15))
+
+static __inline__ int
+tas(volatile slock_t *lock)
+{
+	volatile int *lockword = TAS_ACTIVE_WORD(lock);
+	int			lockval;
+
+	/*
+	 * The LDCWX instruction atomically clears the target word and
+	 * returns the previous value.  Hence, if the instruction returns
+	 * 0, someone else has already acquired the lock before we tested
+	 * it (i.e., we have failed).
+	 *
+	 * Notice that this means that we actually clear the word to set
+	 * the lock and set the word to clear the lock.  This is the
+	 * opposite behavior from the SPARC LDSTUB instruction.  For some
+	 * reason everything that H-P does is rather baroque...
+	 *
+	 * For details about the LDCWX instruction, see the "Precision
+	 * Architecture and Instruction Reference Manual" (09740-90014 of June
+	 * 1987), p. 5-38.
+	 */
+	__asm__ __volatile__(
+		"	ldcwx	0(0,%2),%0	\n"
+:		"=r"(lockval), "+m"(*lockword)
+:		"r"(lockword)
+:		"memory");
+	return (lockval == 0);
+}
+
+#define S_UNLOCK(lock)	\
+	do { \
+		__asm__ __volatile__("" : : : "memory"); \
+		*TAS_ACTIVE_WORD(lock) = -1; \
+	} while (0)
+
+#define S_INIT_LOCK(lock) \
+	do { \
+		volatile slock_t *lock_ = (lock); \
+		lock_->sema[0] = -1; \
+		lock_->sema[1] = -1; \
+		lock_->sema[2] = -1; \
+		lock_->sema[3] = -1; \
+	} while (0)
+
+#define S_LOCK_FREE(lock)	(*TAS_ACTIVE_WORD(lock) != 0)
+
+#endif	 /* __hppa || __hppa__ */
+
 
 /*
  * If we have no platform-specific knowledge, but we found that the compiler
@@ -596,6 +665,21 @@ tas(volatile slock_t *lock)
  */
 
 #if !defined(HAS_TEST_AND_SET)	/* We didn't trigger above, let's try here */
+
+#if defined(_AIX)	/* AIX */
+/*
+ * AIX (POWER)
+ */
+#define HAS_TEST_AND_SET
+
+#include <sys/atomic_op.h>
+
+typedef int slock_t;
+
+#define TAS(lock)			_check_lock((slock_t *) (lock), 0, 1)
+#define S_UNLOCK(lock)		_clear_lock((slock_t *) (lock), 0)
+#endif	 /* _AIX */
+
 
 /* These are in sunstudio_(sparc|x86).s */
 
@@ -737,6 +821,7 @@ extern int	tas(volatile slock_t *lock);		/* in port/.../tas.s, or
 #define TAS_SPIN(lock)	TAS(lock)
 #endif	 /* TAS_SPIN */
 
+extern PGDLLIMPORT slock_t dummy_spinlock;
 
 /*
  * Platform-independent out-of-line support routines

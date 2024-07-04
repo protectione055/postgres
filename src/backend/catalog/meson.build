@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, PostgreSQL Global Development Group
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
 
 backend_sources += files(
   'aclchk.c',
@@ -38,6 +38,7 @@ backend_sources += files(
 
 
 install_data(
+  'fix-CVE-2024-4317.sql',
   'information_schema.sql',
   'sql_features.txt',
   'system_functions.sql',

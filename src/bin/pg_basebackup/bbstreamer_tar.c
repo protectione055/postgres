@@ -12,7 +12,7 @@
  * just adds two blocks of NUL bytes to the end of the file, since older
  * server versions produce files with this terminator omitted.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/bbstreamer_tar.c
@@ -50,7 +50,7 @@ static void bbstreamer_tar_parser_finalize(bbstreamer *streamer);
 static void bbstreamer_tar_parser_free(bbstreamer *streamer);
 static bool bbstreamer_tar_header(bbstreamer_tar_parser *mystreamer);
 
-static const bbstreamer_ops bbstreamer_tar_parser_ops = {
+const bbstreamer_ops bbstreamer_tar_parser_ops = {
 	.content = bbstreamer_tar_parser_content,
 	.finalize = bbstreamer_tar_parser_finalize,
 	.free = bbstreamer_tar_parser_free
@@ -63,7 +63,7 @@ static void bbstreamer_tar_archiver_content(bbstreamer *streamer,
 static void bbstreamer_tar_archiver_finalize(bbstreamer *streamer);
 static void bbstreamer_tar_archiver_free(bbstreamer *streamer);
 
-static const bbstreamer_ops bbstreamer_tar_archiver_ops = {
+const bbstreamer_ops bbstreamer_tar_archiver_ops = {
 	.content = bbstreamer_tar_archiver_content,
 	.finalize = bbstreamer_tar_archiver_finalize,
 	.free = bbstreamer_tar_archiver_free
@@ -76,7 +76,7 @@ static void bbstreamer_tar_terminator_content(bbstreamer *streamer,
 static void bbstreamer_tar_terminator_finalize(bbstreamer *streamer);
 static void bbstreamer_tar_terminator_free(bbstreamer *streamer);
 
-static const bbstreamer_ops bbstreamer_tar_terminator_ops = {
+const bbstreamer_ops bbstreamer_tar_terminator_ops = {
 	.content = bbstreamer_tar_terminator_content,
 	.finalize = bbstreamer_tar_terminator_finalize,
 	.free = bbstreamer_tar_terminator_free
@@ -89,7 +89,7 @@ static const bbstreamer_ops bbstreamer_tar_terminator_ops = {
  * specified by 'next' will receive a series of typed chunks, as per the
  * conventions described in bbstreamer.h.
  */
-bbstreamer *
+extern bbstreamer *
 bbstreamer_tar_parser_new(bbstreamer *next)
 {
 	bbstreamer_tar_parser *streamer;
@@ -286,20 +286,22 @@ bbstreamer_tar_header(bbstreamer_tar_parser *mystreamer)
 
 	/*
 	 * Parse key fields out of the header.
+	 *
+	 * FIXME: It's terrible that we use hard-coded values here instead of some
+	 * more principled approach. It's been like this for a long time, but we
+	 * ought to do better.
 	 */
-	strlcpy(member->pathname, &buffer[TAR_OFFSET_NAME], MAXPGPATH);
+	strlcpy(member->pathname, &buffer[0], MAXPGPATH);
 	if (member->pathname[0] == '\0')
 		pg_fatal("tar member has empty name");
-	member->size = read_tar_number(&buffer[TAR_OFFSET_SIZE], 12);
-	member->mode = read_tar_number(&buffer[TAR_OFFSET_MODE], 8);
-	member->uid = read_tar_number(&buffer[TAR_OFFSET_UID], 8);
-	member->gid = read_tar_number(&buffer[TAR_OFFSET_GID], 8);
-	member->is_directory =
-		(buffer[TAR_OFFSET_TYPEFLAG] == TAR_FILETYPE_DIRECTORY);
-	member->is_link =
-		(buffer[TAR_OFFSET_TYPEFLAG] == TAR_FILETYPE_SYMLINK);
+	member->size = read_tar_number(&buffer[124], 12);
+	member->mode = read_tar_number(&buffer[100], 8);
+	member->uid = read_tar_number(&buffer[108], 8);
+	member->gid = read_tar_number(&buffer[116], 8);
+	member->is_directory = (buffer[156] == '5');
+	member->is_link = (buffer[156] == '2');
 	if (member->is_link)
-		strlcpy(member->linktarget, &buffer[TAR_OFFSET_LINKNAME], 100);
+		strlcpy(member->linktarget, &buffer[157], 100);
 
 	/* Compute number of padding bytes. */
 	mystreamer->pad_bytes_expected = tarPaddingBytesRequired(member->size);
@@ -345,14 +347,14 @@ bbstreamer_tar_parser_free(bbstreamer *streamer)
 }
 
 /*
- * Create a bbstreamer that can generate a tar archive.
+ * Create an bbstreamer that can generate a tar archive.
  *
  * This is intended to be usable either for generating a brand-new tar archive
  * or for modifying one on the fly. The input should be a series of typed
  * chunks (i.e. not BBSTREAMER_UNKNOWN). See also the comments for
  * bbstreamer_tar_parser_content.
  */
-bbstreamer *
+extern bbstreamer *
 bbstreamer_tar_archiver_new(bbstreamer *next)
 {
 	bbstreamer_tar_archiver *streamer;

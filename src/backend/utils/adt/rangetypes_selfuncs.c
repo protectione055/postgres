@@ -6,7 +6,7 @@
  * Estimates are based on histograms of lower and upper bounds, and the
  * fraction of empty ranges.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -22,6 +22,7 @@
 #include "access/htup_details.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_statistic.h"
+#include "catalog/pg_type.h"
 #include "utils/float.h"
 #include "utils/fmgrprotos.h"
 #include "utils/lsyscache.h"
@@ -195,10 +196,9 @@ rangesel(PG_FUNCTION_ARGS)
 	else if (operator == OID_RANGE_ELEM_CONTAINED_OP)
 	{
 		/*
-		 * Here, the Var is the elem, not the range.  In typical cases
-		 * elem_contained_by_range_support will have simplified this case, so
-		 * that we won't get here.  If we do get here we'll fall back on a
-		 * default estimate.
+		 * Here, the Var is the elem, not the range.  For now we just punt and
+		 * return the default estimate.  In future we could disassemble the
+		 * range constant and apply scalarineqsel ...
 		 */
 	}
 	else if (((Const *) other)->consttype == vardata.vartype)

@@ -3,7 +3,7 @@
  * tsquery_gist.c
  *	  GiST index support for tsquery
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -16,9 +16,8 @@
 
 #include "access/gist.h"
 #include "access/stratnum.h"
-#include "common/int.h"
 #include "tsearch/ts_utils.h"
-#include "utils/fmgrprotos.h"
+#include "utils/builtins.h"
 
 #define GETENTRY(vec,pos) DatumGetTSQuerySign((vec)->vector[pos].key)
 
@@ -157,8 +156,10 @@ typedef struct
 static int
 comparecost(const void *a, const void *b)
 {
-	return pg_cmp_s32(((const SPLITCOST *) a)->cost,
-					  ((const SPLITCOST *) b)->cost);
+	if (((const SPLITCOST *) a)->cost == ((const SPLITCOST *) b)->cost)
+		return 0;
+	else
+		return (((const SPLITCOST *) a)->cost > ((const SPLITCOST *) b)->cost) ? 1 : -1;
 }
 
 #define WISH_F(a,b,c) (double)( -(double)(((a)-(b))*((a)-(b))*((a)-(b)))*(c) )

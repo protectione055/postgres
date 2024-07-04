@@ -1,8 +1,8 @@
 
-# Copyright (c) 2021-2024, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 use strict;
-use warnings FATAL => 'all';
+use warnings;
 
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
@@ -410,14 +410,6 @@ check_completion(
 	"\\echo :VERB\t",
 	qr/:VERBOSITY /,
 	"complete an interpolated psql variable name");
-
-clear_query();
-
-# check completion for psql variable test
-check_completion(
-	"\\echo :{?VERB\t",
-	qr/:\{\?VERBOSITY} /,
-	"complete a psql variable test");
 
 clear_query();
 

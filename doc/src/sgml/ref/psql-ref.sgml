@@ -3570,14 +3570,13 @@ testdb=&gt; <userinput>\setenv LESS -imx4F</userinput>
 
 
       <varlistentry id="app-psql-meta-command-watch">
-        <term><literal>\watch [ i[nterval]=<replaceable class="parameter">seconds</replaceable> ] [ c[ount]=<replaceable class="parameter">times</replaceable> ] [ m[in_rows]=<replaceable class="parameter">rows</replaceable> ] [ <replaceable class="parameter">seconds</replaceable> ]</literal></term>
+        <term><literal>\watch [ i[nterval]=<replaceable class="parameter">seconds</replaceable> ] [ c[ount]=<replaceable class="parameter">times</replaceable> ] [ <replaceable class="parameter">seconds</replaceable> ]</literal></term>
         <listitem>
         <para>
         Repeatedly execute the current query buffer (as <literal>\g</literal> does)
         until interrupted, or the query fails, or the execution count limit
-        (if given) is reached, or the query no longer returns the minimum number
-        of rows. Wait the specified number of seconds (default 2) between executions.
-        For backwards compatibility,
+        (if given) is reached.  Wait the specified number of
+        seconds (default 2) between executions.  For backwards compatibility,
         <replaceable class="parameter">seconds</replaceable> can be specified
         with or without an <literal>interval=</literal> prefix.
         Each query result is
@@ -5309,9 +5308,9 @@ This second example shows a multiplication table with rows sorted in reverse
 numerical order and columns with an independent, ascending numerical order.
 <programlisting>
 testdb=&gt; <userinput>SELECT t1.first as "A", t2.first+100 AS "B", t1.first*(t2.first+100) as "AxB",</userinput>
-testdb-&gt; <userinput>row_number() over(order by t2.first) AS ord</userinput>
-testdb-&gt; <userinput>FROM my_table t1 CROSS JOIN my_table t2 ORDER BY 1 DESC</userinput>
-testdb-&gt; <userinput>\crosstabview "A" "B" "AxB" ord</userinput>
+testdb(&gt; <userinput>row_number() over(order by t2.first) AS ord</userinput>
+testdb(&gt; <userinput>FROM my_table t1 CROSS JOIN my_table t2 ORDER BY 1 DESC</userinput>
+testdb(&gt; <userinput>\crosstabview "A" "B" "AxB" ord</userinput>
  A | 101 | 102 | 103 | 104
 ---+-----+-----+-----+-----
  4 | 404 | 408 | 412 | 416

@@ -1,9 +1,7 @@
 #!/usr/bin/perl
 
-# Copyright (c) 2024, PostgreSQL Global Development Group
-
 use strict;
-use warnings FATAL => 'all';
+use warnings;
 use Getopt::Long;
 
 my $outdir_path = '';

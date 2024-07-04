@@ -18,8 +18,6 @@ REGRESS = cube cube_sci
 
 SHLIB_LINK += $(filter -lm, $(LIBS))
 
-EXTRA_CLEAN = cubeparse.h cubeparse.c cubescan.c
-
 ifdef USE_PGXS
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -39,3 +37,8 @@ cubeparse.c: BISONFLAGS += -d
 
 # Force these dependencies to be known even without dependency info built:
 cubeparse.o cubescan.o: cubeparse.h
+
+distprep: cubeparse.c cubescan.c
+
+maintainer-clean:
+	rm -f cubeparse.h cubeparse.c cubescan.c

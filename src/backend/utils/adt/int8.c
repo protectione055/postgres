@@ -3,7 +3,7 @@
  * int8.c
  *	  Internal 64-bit integer operations
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -24,6 +24,7 @@
 #include "nodes/supportnodes.h"
 #include "optimizer/optimizer.h"
 #include "utils/builtins.h"
+#include "utils/lsyscache.h"
 
 
 typedef struct
@@ -832,6 +833,21 @@ int8inc_support(PG_FUNCTION_ARGS)
 		SupportRequestWFuncMonotonic *req = (SupportRequestWFuncMonotonic *) rawreq;
 		MonotonicFunction monotonic = MONOTONICFUNC_NONE;
 		int			frameOptions = req->window_clause->frameOptions;
+		WindowFunc *wfunc = req->window_func;
+
+		if (list_length(wfunc->args) == 1)
+		{
+			Node *expr = eval_const_expressions(NULL, linitial(wfunc->args));
+
+			/*
+			 * Due to the Node representation of WindowClause runConditions in
+			 * version prior to v17, we need to insist that the count arg is
+			 * Const to allow safe application of the runCondition
+			 * optimization.
+			 */
+			if (!IsA(expr, Const))
+				PG_RETURN_POINTER(NULL);
+		}
 
 		/* No ORDER BY clause then all rows are peers */
 		if (req->window_clause->orderClause == NIL)

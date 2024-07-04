@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, PostgreSQL Global Development Group
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
 
 test_oat_hooks_sources = files(
   'test_oat_hooks.c',
@@ -23,7 +23,6 @@ tests += {
   'regress': {
     'sql': [
       'test_oat_hooks',
-      'alter_table',
     ],
     'regress_args': ['--no-locale', '--encoding=UTF8'],
     'runningcheck': false,

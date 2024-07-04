@@ -9,7 +9,7 @@
  * shorn of features like subselects, inheritance, aggregates, grouping,
  * and so on.  (Those are the things planner.c deals with.)
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -22,6 +22,7 @@
 
 #include "optimizer/appendinfo.h"
 #include "optimizer/clauses.h"
+#include "optimizer/inherit.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/orclauses.h"
 #include "optimizer/pathnode.h"
@@ -111,17 +112,14 @@ query_planner(PlannerInfo *root,
 				 * quals are parallel-restricted.  (We need not check
 				 * final_rel->reltarget because it's empty at this point.
 				 * Anything parallel-restricted in the query tlist will be
-				 * dealt with later.)  We should always do this in a subquery,
-				 * since it might be useful to use the subquery in parallel
-				 * paths in the parent level.  At top level this is normally
-				 * not worth the cycles, because a Result-only plan would
-				 * never be interesting to parallelize.  However, if
-				 * debug_parallel_query is on, then we want to execute the
-				 * Result in a parallel worker if possible, so we must check.
+				 * dealt with later.)  This is normally pretty silly, because
+				 * a Result-only plan would never be interesting to
+				 * parallelize.  However, if debug_parallel_query is on, then
+				 * we want to execute the Result in a parallel worker if
+				 * possible, so we must do this.
 				 */
 				if (root->glob->parallelModeOK &&
-					(root->query_level > 1 ||
-					 debug_parallel_query != DEBUG_PARALLEL_OFF))
+					debug_parallel_query != DEBUG_PARALLEL_OFF)
 					final_rel->consider_parallel =
 						is_parallel_safe(root, parse->jointree->quals);
 

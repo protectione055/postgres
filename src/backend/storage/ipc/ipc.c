@@ -8,7 +8,7 @@
  * exit-time cleanup for either a postmaster or a backend.
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -136,7 +136,7 @@ proc_exit(int code)
 		 */
 		char		gprofDirName[32];
 
-		if (AmAutoVacuumWorkerProcess())
+		if (IsAutoVacuumWorkerProcess())
 			snprintf(gprofDirName, 32, "gprof/avworker");
 		else
 			snprintf(gprofDirName, 32, "gprof/%d", (int) getpid());

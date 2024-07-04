@@ -3,7 +3,7 @@
  * postinit.c
  *	  postgres initialization utilities
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -23,10 +23,12 @@
 #include "access/heapam.h"
 #include "access/htup_details.h"
 #include "access/session.h"
+#include "access/sysattr.h"
 #include "access/tableam.h"
 #include "access/xact.h"
 #include "access/xlog.h"
 #include "access/xloginsert.h"
+#include "catalog/catalog.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_collation.h"
@@ -41,7 +43,6 @@
 #include "postmaster/autovacuum.h"
 #include "postmaster/postmaster.h"
 #include "replication/slot.h"
-#include "replication/slotsync.h"
 #include "replication/walsender.h"
 #include "storage/bufmgr.h"
 #include "storage/fd.h"
@@ -74,7 +75,6 @@ static void ShutdownPostgres(int code, Datum arg);
 static void StatementTimeoutHandler(void);
 static void LockTimeoutHandler(void);
 static void IdleInTransactionSessionTimeoutHandler(void);
-static void TransactionTimeoutHandler(void);
 static void IdleSessionTimeoutHandler(void);
 static void IdleStatsUpdateTimeoutHandler(void);
 static void ClientCheckTimeoutHandler(void);
@@ -318,7 +318,7 @@ CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connect
 	bool		isnull;
 	char	   *collate;
 	char	   *ctype;
-	char	   *datlocale;
+	char	   *iculocale;
 
 	/* Fetch our pg_database row normally, via syscache */
 	tup = SearchSysCache1(DATABASEOID, ObjectIdGetDatum(MyDatabaseId));
@@ -344,7 +344,7 @@ CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connect
 	 *
 	 * We do not enforce them for autovacuum worker processes either.
 	 */
-	if (IsUnderPostmaster && !AmAutoVacuumWorkerProcess())
+	if (IsUnderPostmaster && !IsAutoVacuumWorkerProcess())
 	{
 		/*
 		 * Check that the database is currently allowing connections.
@@ -423,22 +423,12 @@ CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connect
 		strcmp(ctype, "POSIX") == 0)
 		database_ctype_is_c = true;
 
-	if (dbform->datlocprovider == COLLPROVIDER_BUILTIN)
-	{
-		datum = SysCacheGetAttrNotNull(DATABASEOID, tup, Anum_pg_database_datlocale);
-		datlocale = TextDatumGetCString(datum);
-
-		builtin_validate_locale(dbform->encoding, datlocale);
-
-		default_locale.info.builtin.locale = MemoryContextStrdup(
-																 TopMemoryContext, datlocale);
-	}
-	else if (dbform->datlocprovider == COLLPROVIDER_ICU)
+	if (dbform->datlocprovider == COLLPROVIDER_ICU)
 	{
 		char	   *icurules;
 
-		datum = SysCacheGetAttrNotNull(DATABASEOID, tup, Anum_pg_database_datlocale);
-		datlocale = TextDatumGetCString(datum);
+		datum = SysCacheGetAttrNotNull(DATABASEOID, tup, Anum_pg_database_daticulocale);
+		iculocale = TextDatumGetCString(datum);
 
 		datum = SysCacheGetAttr(DATABASEOID, tup, Anum_pg_database_daticurules, &isnull);
 		if (!isnull)
@@ -446,10 +436,10 @@ CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connect
 		else
 			icurules = NULL;
 
-		make_icu_collator(datlocale, icurules, &default_locale);
+		make_icu_collator(iculocale, icurules, &default_locale);
 	}
 	else
-		datlocale = NULL;
+		iculocale = NULL;
 
 	default_locale.provider = dbform->datlocprovider;
 
@@ -471,16 +461,10 @@ CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connect
 	{
 		char	   *actual_versionstr;
 		char	   *collversionstr;
-		char	   *locale;
 
 		collversionstr = TextDatumGetCString(datum);
 
-		if (dbform->datlocprovider == COLLPROVIDER_LIBC)
-			locale = collate;
-		else
-			locale = datlocale;
-
-		actual_versionstr = get_collation_actual_version(dbform->datlocprovider, locale);
+		actual_versionstr = get_collation_actual_version(dbform->datlocprovider, dbform->datlocprovider == COLLPROVIDER_ICU ? iculocale : collate);
 		if (!actual_versionstr)
 			/* should not happen */
 			elog(WARNING,
@@ -697,10 +681,8 @@ BaseInit(void)
  * Parameters:
  *	in_dbname, dboid: specify database to connect to, as described below
  *	username, useroid: specify role to connect as, as described below
- *	flags:
- *	  - INIT_PG_LOAD_SESSION_LIBS to honor [session|local]_preload_libraries.
- *	  - INIT_PG_OVERRIDE_ALLOW_CONNS to connect despite !datallowconn.
- *	  - INIT_PG_OVERRIDE_ROLE_LOGIN to connect despite !rolcanlogin.
+ *	load_session_libraries: TRUE to honor [session|local]_preload_libraries
+ *	override_allow_connections: TRUE to connect despite !datallowconn
  *	out_dbname: optional output parameter, see below; pass NULL if not used
  *
  * The database can be specified by name, using the in_dbname parameter, or by
@@ -719,8 +701,8 @@ BaseInit(void)
  * database but not a username; conversely, a physical walsender specifies
  * username but not database.
  *
- * By convention, INIT_PG_LOAD_SESSION_LIBS should be passed in "flags" in
- * "interactive" sessions (including standalone backends), but not in
+ * By convention, load_session_libraries should be passed as true in
+ * "interactive" sessions (including standalone backends), but false in
  * background processes such as autovacuum.  Note in particular that it
  * shouldn't be true in parallel worker processes; those have another
  * mechanism for replicating their leader's set of loaded libraries.
@@ -735,7 +717,8 @@ BaseInit(void)
 void
 InitPostgres(const char *in_dbname, Oid dboid,
 			 const char *username, Oid useroid,
-			 bits32 flags,
+			 bool load_session_libraries,
+			 bool override_allow_connections,
 			 char *out_dbname)
 {
 	bool		bootstrap = IsBootstrapProcessingMode();
@@ -756,10 +739,18 @@ InitPostgres(const char *in_dbname, Oid dboid,
 	/*
 	 * Initialize my entry in the shared-invalidation manager's array of
 	 * per-backend data.
+	 *
+	 * Sets up MyBackendId, a unique backend identifier.
 	 */
+	MyBackendId = InvalidBackendId;
+
 	SharedInvalBackendInit(false);
 
-	ProcSignalInit();
+	if (MyBackendId > MaxBackends || MyBackendId <= 0)
+		elog(FATAL, "bad backend ID: %d", MyBackendId);
+
+	/* Now that we have a BackendId, we can participate in ProcSignal */
+	ProcSignalInit(MyBackendId);
 
 	/*
 	 * Also set up timeout handlers needed for backend operation.  We need
@@ -772,7 +763,6 @@ InitPostgres(const char *in_dbname, Oid dboid,
 		RegisterTimeout(LOCK_TIMEOUT, LockTimeoutHandler);
 		RegisterTimeout(IDLE_IN_TRANSACTION_SESSION_TIMEOUT,
 						IdleInTransactionSessionTimeoutHandler);
-		RegisterTimeout(TRANSACTION_TIMEOUT, TransactionTimeoutHandler);
 		RegisterTimeout(IDLE_SESSION_TIMEOUT, IdleSessionTimeoutHandler);
 		RegisterTimeout(CLIENT_CONNECTION_CHECK_TIMEOUT, ClientCheckTimeoutHandler);
 		RegisterTimeout(IDLE_STATS_UPDATE_TIMEOUT,
@@ -842,7 +832,7 @@ InitPostgres(const char *in_dbname, Oid dboid,
 	before_shmem_exit(ShutdownPostgres, 0);
 
 	/* The autovacuum launcher is done here */
-	if (AmAutoVacuumLauncherProcess())
+	if (IsAutoVacuumLauncherProcess())
 	{
 		/* report this backend in the PgBackendStatus array */
 		pgstat_bestart();
@@ -883,11 +873,10 @@ InitPostgres(const char *in_dbname, Oid dboid,
 	 * Perform client authentication if necessary, then figure out our
 	 * postgres user ID, and see if we are a superuser.
 	 *
-	 * In standalone mode, autovacuum worker processes and slot sync worker
-	 * process, we use a fixed ID, otherwise we figure it out from the
-	 * authenticated user name.
+	 * In standalone mode and in autovacuum worker processes, we use a fixed
+	 * ID, otherwise we figure it out from the authenticated user name.
 	 */
-	if (bootstrap || AmAutoVacuumWorkerProcess() || AmLogicalSlotSyncWorkerProcess())
+	if (bootstrap || IsAutoVacuumWorkerProcess())
 	{
 		InitializeSessionUserIdStandalone();
 		am_superuser = true;
@@ -903,7 +892,7 @@ InitPostgres(const char *in_dbname, Oid dboid,
 					 errhint("You should immediately run CREATE USER \"%s\" SUPERUSER;.",
 							 username != NULL ? username : "postgres")));
 	}
-	else if (AmBackgroundWorkerProcess())
+	else if (IsBackgroundWorker)
 	{
 		if (username == NULL && !OidIsValid(useroid))
 		{
@@ -912,8 +901,7 @@ InitPostgres(const char *in_dbname, Oid dboid,
 		}
 		else
 		{
-			InitializeSessionUserId(username, useroid,
-									(flags & INIT_PG_OVERRIDE_ROLE_LOGIN) != 0);
+			InitializeSessionUserId(username, useroid);
 			am_superuser = superuser();
 		}
 	}
@@ -922,7 +910,7 @@ InitPostgres(const char *in_dbname, Oid dboid,
 		/* normal multiuser case */
 		Assert(MyProcPort != NULL);
 		PerformAuthentication(MyProcPort);
-		InitializeSessionUserId(username, useroid, false);
+		InitializeSessionUserId(username, useroid);
 		/* ensure that auth_method is actually valid, aka authn_id is not NULL */
 		if (MyClientConnectionInfo.authn_id)
 			InitializeSystemUser(MyClientConnectionInfo.authn_id,
@@ -1113,7 +1101,6 @@ InitPostgres(const char *in_dbname, Oid dboid,
 		}
 
 		MyDatabaseTableSpace = datform->dattablespace;
-		MyDatabaseHasLoginEventTriggers = datform->dathasloginevt;
 		/* pass the database name back to the caller */
 		if (out_dbname)
 			strcpy(out_dbname, dbname);
@@ -1202,8 +1189,7 @@ InitPostgres(const char *in_dbname, Oid dboid,
 	 * user is a superuser, so the above stuff has to happen first.)
 	 */
 	if (!bootstrap)
-		CheckMyDatabase(dbname, am_superuser,
-						(flags & INIT_PG_OVERRIDE_ALLOW_CONNS) != 0);
+		CheckMyDatabase(dbname, am_superuser, override_allow_connections);
 
 	/*
 	 * Now process any command-line switches and any additional GUC variable
@@ -1241,7 +1227,7 @@ InitPostgres(const char *in_dbname, Oid dboid,
 	 * during the initial transaction in case anything that requires database
 	 * access needs to be done.
 	 */
-	if ((flags & INIT_PG_LOAD_SESSION_LIBS) != 0)
+	if (load_session_libraries)
 		process_session_preload_libraries();
 
 	/* report this backend in the PgBackendStatus array */
@@ -1403,14 +1389,6 @@ LockTimeoutHandler(void)
 	kill(-MyProcPid, SIGINT);
 #endif
 	kill(MyProcPid, SIGINT);
-}
-
-static void
-TransactionTimeoutHandler(void)
-{
-	TransactionTimeoutPending = true;
-	InterruptPending = true;
-	SetLatch(MyLatch);
 }
 
 static void

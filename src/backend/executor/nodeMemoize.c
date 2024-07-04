@@ -3,7 +3,7 @@
  * nodeMemoize.c
  *	  Routines to handle caching of results from parameterized nodes
  *
- * Portions Copyright (c) 2021-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2021-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -175,10 +175,10 @@ MemoizeHash_hash(struct memoize_hash *tb, const MemoizeKey *key)
 
 			if (!pslot->tts_isnull[i])	/* treat nulls as having hash key 0 */
 			{
-				Form_pg_attribute attr;
+				FormData_pg_attribute *attr;
 				uint32		hkey;
 
-				attr = TupleDescAttr(pslot->tts_tupleDescriptor, i);
+				attr = &pslot->tts_tupleDescriptor->attrs[i];
 
 				hkey = datum_image_hash(pslot->tts_values[i], attr->attbyval, attr->attlen);
 
@@ -242,7 +242,7 @@ MemoizeHash_equal(struct memoize_hash *tb, const MemoizeKey *key1,
 
 		for (int i = 0; i < numkeys; i++)
 		{
-			Form_pg_attribute attr;
+			FormData_pg_attribute *attr;
 
 			if (tslot->tts_isnull[i] != pslot->tts_isnull[i])
 			{
@@ -255,7 +255,7 @@ MemoizeHash_equal(struct memoize_hash *tb, const MemoizeKey *key1,
 				continue;
 
 			/* perform binary comparison on the two datums */
-			attr = TupleDescAttr(tslot->tts_tupleDescriptor, i);
+			attr = &tslot->tts_tupleDescriptor->attrs[i];
 			if (!datum_image_eq(tslot->tts_values[i], pslot->tts_values[i],
 								attr->attbyval, attr->attlen))
 			{
@@ -276,14 +276,11 @@ MemoizeHash_equal(struct memoize_hash *tb, const MemoizeKey *key1,
 }
 
 /*
- * Initialize the hash table to empty.  The MemoizeState's hashtable field
- * must point to NULL.
+ * Initialize the hash table to empty.
  */
 static void
 build_hash_table(MemoizeState *mstate, uint32 size)
 {
-	Assert(mstate->hashtable == NULL);
-
 	/* Make a guess at a good size when we're not given a valid size. */
 	if (size == 0)
 		size = 1024;
@@ -401,10 +398,8 @@ remove_cache_entry(MemoizeState *mstate, MemoizeEntry *entry)
 static void
 cache_purge_all(MemoizeState *mstate)
 {
-	uint64		evictions = 0;
-
-	if (mstate->hashtable != NULL)
-		evictions = mstate->hashtable->members;
+	uint64		evictions = mstate->hashtable->members;
+	PlanState  *pstate = (PlanState *) mstate;
 
 	/*
 	 * Likely the most efficient way to remove all items is to just reset the
@@ -413,8 +408,8 @@ cache_purge_all(MemoizeState *mstate)
 	 */
 	MemoryContextReset(mstate->tableContext);
 
-	/* NULLify so we recreate the table on the next call */
-	mstate->hashtable = NULL;
+	/* Make the hash table the same size as the original size */
+	build_hash_table(mstate, ((Memoize *) pstate->plan)->est_entries);
 
 	/* reset the LRU list */
 	dlist_init(&mstate->lru_list);
@@ -718,10 +713,6 @@ ExecMemoize(PlanState *pstate)
 				bool		found;
 
 				Assert(node->entry == NULL);
-
-				/* first call? we'll need a hash table. */
-				if (unlikely(node->hashtable == NULL))
-					build_hash_table(node, ((Memoize *) pstate->plan)->est_entries);
 
 				/*
 				 * We're only ever in this state for the first call of the
@@ -1067,11 +1058,8 @@ ExecInitMemoize(Memoize *node, EState *estate, int eflags)
 	/* Zero the statistics counters */
 	memset(&mstate->stats, 0, sizeof(MemoizeInstrumentation));
 
-	/*
-	 * Because it may require a large allocation, we delay building of the
-	 * hash table until executor run.
-	 */
-	mstate->hashtable = NULL;
+	/* Allocate and set up the actual cache */
+	build_hash_table(mstate, node->est_entries);
 
 	return mstate;
 }
@@ -1081,7 +1069,6 @@ ExecEndMemoize(MemoizeState *node)
 {
 #ifdef USE_ASSERT_CHECKING
 	/* Validate the memory accounting code is correct in assert builds. */
-	if (node->hashtable != NULL)
 	{
 		int			count;
 		uint64		mem = 0;
@@ -1129,6 +1116,15 @@ ExecEndMemoize(MemoizeState *node)
 
 	/* Remove the cache context */
 	MemoryContextDelete(node->tableContext);
+
+	ExecClearTuple(node->ss.ss_ScanTupleSlot);
+	/* must drop pointer to cache result tuple */
+	ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
+
+	/*
+	 * free exprcontext
+	 */
+	ExecFreeExprContext(&node->ss.ps);
 
 	/*
 	 * shut down the subplan

@@ -33,5 +33,5 @@ installdirs: installdirs-lib
 
 uninstall: uninstall-lib
 
-clean distclean: clean-lib
+clean distclean maintainer-clean: clean-lib
 	rm -f $(OBJS)

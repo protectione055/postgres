@@ -11,6 +11,14 @@
 #include <stdlib.h>
 #include "ecpg_config.h"
 
+#ifndef ENABLE_THREAD_SAFETY
+int
+main(void)
+{
+	printf("No threading enabled.\n");
+	return 0;
+}
+#else
 #ifdef WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -93,7 +101,7 @@ struct sqlca_t *ECPGget_sqlca(void);
 
 #endif
 
-#line 18 "alloc.pgc"
+#line 26 "alloc.pgc"
 
 
 #line 1 "regression.h"
@@ -103,14 +111,14 @@ struct sqlca_t *ECPGget_sqlca(void);
 
 
 
-#line 19 "alloc.pgc"
+#line 27 "alloc.pgc"
 
 
 /* exec sql whenever sqlerror  sqlprint ; */
-#line 21 "alloc.pgc"
+#line 29 "alloc.pgc"
 
 /* exec sql whenever not found  sqlprint ; */
-#line 22 "alloc.pgc"
+#line 30 "alloc.pgc"
 
 
 #ifdef WIN32
@@ -126,54 +134,54 @@ static void* fn(void* arg)
 	 
 	   
 	
-#line 33 "alloc.pgc"
+#line 41 "alloc.pgc"
  int value ;
  
-#line 34 "alloc.pgc"
+#line 42 "alloc.pgc"
  char name [ 100 ] ;
  
-#line 35 "alloc.pgc"
+#line 43 "alloc.pgc"
  char ** r = NULL ;
 /* exec sql end declare section */
-#line 36 "alloc.pgc"
+#line 44 "alloc.pgc"
 
 
 	value = (intptr_t) arg;
 	sprintf(name, "Connection: %d", value);
 
 	{ ECPGconnect(__LINE__, 0, "ecpg1_regression" , NULL, NULL , name, 0); 
-#line 41 "alloc.pgc"
+#line 49 "alloc.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 41 "alloc.pgc"
+#line 49 "alloc.pgc"
 
 	{ ECPGsetcommit(__LINE__, "on", NULL);
-#line 42 "alloc.pgc"
+#line 50 "alloc.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 42 "alloc.pgc"
+#line 50 "alloc.pgc"
 
 	for (i = 1; i <= REPEATS; ++i)
 	{
 		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "select relname from pg_class where relname = 'pg_class'", ECPGt_EOIT, 
 	ECPGt_char,&(r),(long)0,(long)0,(1)*sizeof(char), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EORT);
-#line 45 "alloc.pgc"
+#line 53 "alloc.pgc"
 
 if (sqlca.sqlcode == ECPG_NOT_FOUND) sqlprint();
-#line 45 "alloc.pgc"
+#line 53 "alloc.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 45 "alloc.pgc"
+#line 53 "alloc.pgc"
 
 		free(r);
 		r = NULL;
 	}
 	{ ECPGdisconnect(__LINE__, name);
-#line 49 "alloc.pgc"
+#line 57 "alloc.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 49 "alloc.pgc"
+#line 57 "alloc.pgc"
 
 
 	return 0;
@@ -207,3 +215,4 @@ int main ()
 
 	return 0;
 }
+#endif

@@ -8,7 +8,7 @@
  *
  * This code is released under the terms of the PostgreSQL License.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/test/regress/pg_regress.c
@@ -32,7 +32,6 @@
 #include "common/username.h"
 #include "getopt_long.h"
 #include "lib/stringinfo.h"
-#include "libpq-fe.h"
 #include "libpq/pqcomm.h"		/* needed for UNIXSOCK_PATH() */
 #include "pg_config_paths.h"
 #include "pg_regress.h"
@@ -76,12 +75,6 @@ const char *pretty_diff_opts = "-w -U3";
  */
 #define TESTNAME_WIDTH 36
 
-/*
- * The number times per second that pg_regress checks to see if the test
- * instance server has started and is available for connection.
- */
-#define WAIT_TICKS_PER_SECOND 20
-
 typedef enum TAPtype
 {
 	DIAG = 0,
@@ -91,7 +84,7 @@ typedef enum TAPtype
 	NOTE_END,
 	TEST_STATUS,
 	PLAN,
-	NONE,
+	NONE
 } TAPtype;
 
 /* options settable from command line */
@@ -114,7 +107,6 @@ static bool nolocale = false;
 static bool use_existing = false;
 static char *hostname = NULL;
 static int	port = -1;
-static char portstr[16];
 static bool port_specified_by_user = false;
 static char *dlpath = PKGLIBDIR;
 static char *user = NULL;
@@ -341,14 +333,6 @@ emit_tap_output_v(TAPtype type, const char *fmt, va_list argp)
 {
 	va_list		argp_logfile;
 	FILE	   *fp;
-	int			save_errno;
-
-	/*
-	 * The fprintf() calls used to output TAP-protocol elements might clobber
-	 * errno, so save it here and restore it before vfprintf()-ing the user's
-	 * format string, in case it contains %m placeholders.
-	 */
-	save_errno = errno;
 
 	/*
 	 * Diagnostic output will be hidden by prove unless printed to stderr. The
@@ -387,13 +371,9 @@ emit_tap_output_v(TAPtype type, const char *fmt, va_list argp)
 		if (logfile)
 			fprintf(logfile, "# ");
 	}
-	errno = save_errno;
 	vfprintf(fp, fmt, argp);
 	if (logfile)
-	{
-		errno = save_errno;
 		vfprintf(logfile, fmt, argp_logfile);
-	}
 
 	/*
 	 * If we are entering into a note with more details to follow, register
@@ -504,7 +484,10 @@ make_temp_sockdir(void)
 
 	temp_sockdir = mkdtemp(template);
 	if (temp_sockdir == NULL)
-		bail("could not create directory \"%s\": %m", template);
+	{
+		bail("could not create directory \"%s\": %s",
+			 template, strerror(errno));
+	}
 
 	/* Stage file names for remove_temp().  Unsafe in a signal handler. */
 	UNIXSOCK_PATH(sockself, port, temp_sockdir);
@@ -625,7 +608,8 @@ load_resultmap(void)
 		/* OK if it doesn't exist, else complain */
 		if (errno == ENOENT)
 			return;
-		bail("could not open file \"%s\" for reading: %m", buf);
+		bail("could not open file \"%s\" for reading: %s",
+			 buf, strerror(errno));
 	}
 
 	while (fgets(buf, sizeof(buf), f))
@@ -853,7 +837,7 @@ initialize_environment(void)
 		{
 			char		s[16];
 
-			snprintf(s, sizeof(s), "%d", port);
+			sprintf(s, "%d", port);
 			setenv("PGPORT", s, 1);
 		}
 	}
@@ -875,7 +859,7 @@ initialize_environment(void)
 		{
 			char		s[16];
 
-			snprintf(s, sizeof(s), "%d", port);
+			sprintf(s, "%d", port);
 			setenv("PGPORT", s, 1);
 		}
 		if (user != NULL)
@@ -1054,7 +1038,10 @@ config_sspi_auth(const char *pgdata, const char *superuser_name)
 #define CW(cond)	\
 	do { \
 		if (!(cond)) \
-			bail("could not write to file \"%s\": %m", fname); \
+		{ \
+			bail("could not write to file \"%s\": %s", \
+				 fname, strerror(errno)); \
+		} \
 	} while (0)
 
 	res = snprintf(fname, sizeof(fname), "%s/pg_hba.conf", pgdata);
@@ -1069,7 +1056,8 @@ config_sspi_auth(const char *pgdata, const char *superuser_name)
 	hba = fopen(fname, "w");
 	if (hba == NULL)
 	{
-		bail("could not open file \"%s\" for writing: %m", fname);
+		bail("could not open file \"%s\" for writing: %s",
+			 fname, strerror(errno));
 	}
 	CW(fputs("# Configuration written by config_sspi_auth()\n", hba) >= 0);
 	CW(fputs("host all all 127.0.0.1/32  sspi include_realm=1 map=regress\n",
@@ -1083,7 +1071,8 @@ config_sspi_auth(const char *pgdata, const char *superuser_name)
 	ident = fopen(fname, "w");
 	if (ident == NULL)
 	{
-		bail("could not open file \"%s\" for writing: %m", fname);
+		bail("could not open file \"%s\" for writing: %s",
+			 fname, strerror(errno));
 	}
 	CW(fputs("# Configuration written by config_sspi_auth()\n", ident) >= 0);
 
@@ -1177,7 +1166,8 @@ psql_end_command(StringInfo buf, const char *database)
 	}
 
 	/* Clean up */
-	destroyStringInfo(buf);
+	pfree(buf->data);
+	pfree(buf);
 }
 
 /*
@@ -1213,7 +1203,7 @@ spawn_process(const char *cmdline)
 	pid = fork();
 	if (pid == -1)
 	{
-		bail("could not fork: %m");
+		bail("could not fork: %s", strerror(errno));
 	}
 	if (pid == 0)
 	{
@@ -1229,13 +1219,14 @@ spawn_process(const char *cmdline)
 		cmdline2 = psprintf("exec %s", cmdline);
 		execl(shellprog, shellprog, "-c", cmdline2, (char *) NULL);
 		/* Not using the normal bail() here as we want _exit */
-		bail_noatexit("could not exec \"%s\": %m", shellprog);
+		bail_noatexit("could not exec \"%s\": %s", shellprog, strerror(errno));
 	}
 	/* in parent */
 	return pid;
 #else
 	PROCESS_INFORMATION pi;
 	char	   *cmdline2;
+	HANDLE		restrictedToken;
 	const char *comspec;
 
 	/* Find CMD.EXE location using COMSPEC, if it's set */
@@ -1246,7 +1237,8 @@ spawn_process(const char *cmdline)
 	memset(&pi, 0, sizeof(pi));
 	cmdline2 = psprintf("\"%s\" /d /c \"%s\"", comspec, cmdline);
 
-	if (!CreateRestrictedProcess(cmdline2, &pi))
+	if ((restrictedToken =
+		 CreateRestrictedProcess(cmdline2, &pi)) == 0)
 		exit(2);
 
 	CloseHandle(pi.hThread);
@@ -1265,7 +1257,8 @@ file_size(const char *file)
 
 	if (!f)
 	{
-		diag("could not open file \"%s\" for reading: %m", file);
+		diag("could not open file \"%s\" for reading: %s",
+			 file, strerror(errno));
 		return -1;
 	}
 	fseek(f, 0, SEEK_END);
@@ -1286,7 +1279,8 @@ file_line_count(const char *file)
 
 	if (!f)
 	{
-		diag("could not open file \"%s\" for reading: %m", file);
+		diag("could not open file \"%s\" for reading: %s",
+			 file, strerror(errno));
 		return -1;
 	}
 	while ((c = fgetc(f)) != EOF)
@@ -1326,7 +1320,9 @@ static void
 make_directory(const char *dir)
 {
 	if (mkdir(dir, S_IRWXU | S_IRWXG | S_IRWXO) < 0)
-		bail("could not create directory \"%s\": %m", dir);
+	{
+		bail("could not create directory \"%s\": %s", dir, strerror(errno));
+	}
 }
 
 /*
@@ -1455,7 +1451,10 @@ results_differ(const char *testname, const char *resultsfile, const char *defaul
 
 		alt_expectfile = get_alternative_expectfile(expectfile, i);
 		if (!alt_expectfile)
-			bail("Unable to check secondary comparison files: %m");
+		{
+			bail("Unable to check secondary comparison files: %s",
+				 strerror(errno));
+		}
 
 		if (!file_exists(alt_expectfile))
 		{
@@ -1568,7 +1567,9 @@ wait_for_tests(PID_TYPE * pids, int *statuses, instr_time *stoptimes,
 		p = wait(&exit_status);
 
 		if (p == INVALID_PID)
-			bail("failed to wait for subprocesses: %m");
+		{
+			bail("failed to wait for subprocesses: %s", strerror(errno));
+		}
 #else
 		DWORD		exit_status;
 		int			r;
@@ -1658,7 +1659,10 @@ run_schedule(const char *schedule, test_start_function startfunc,
 
 	scf = fopen(schedule, "r");
 	if (!scf)
-		bail("could not open file \"%s\" for reading: %m", schedule);
+	{
+		bail("could not open file \"%s\" for reading: %s",
+			 schedule, strerror(errno));
+	}
 
 	while (fgets(scbuf, sizeof(scbuf), scf))
 	{
@@ -1922,15 +1926,20 @@ open_result_files(void)
 	logfilename = pg_strdup(file);
 	logfile = fopen(logfilename, "w");
 	if (!logfile)
-		bail("could not open file \"%s\" for writing: %m", logfilename);
+	{
+		bail("could not open file \"%s\" for writing: %s",
+			 logfilename, strerror(errno));
+	}
 
 	/* create the diffs file as empty */
 	snprintf(file, sizeof(file), "%s/regression.diffs", outputdir);
 	difffilename = pg_strdup(file);
 	difffile = fopen(difffilename, "w");
 	if (!difffile)
-		bail("could not open file \"%s\" for writing: %m", difffilename);
-
+	{
+		bail("could not open file \"%s\" for writing: %s",
+			 difffilename, strerror(errno));
+	}
 	/* we don't keep the diffs file open continuously */
 	fclose(difffile);
 
@@ -2100,6 +2109,7 @@ regression_main(int argc, char *argv[],
 	int			i;
 	int			option_index;
 	char		buf[MAXPGPATH * 4];
+	char		buf2[MAXPGPATH * 4];
 
 	pg_logging_init(argv[0]);
 	progname = get_progname(argv[0]);
@@ -2283,15 +2293,9 @@ regression_main(int argc, char *argv[],
 
 	if (temp_instance)
 	{
-		StringInfoData cmd;
 		FILE	   *pg_conf;
 		const char *env_wait;
 		int			wait_seconds;
-		const char *initdb_template_dir;
-		const char *keywords[4];
-		const char *values[4];
-		PGPing		rv;
-		const char *initdb_extra_opts_env;
 
 		/*
 		 * Prepare the temp instance
@@ -2313,73 +2317,23 @@ regression_main(int argc, char *argv[],
 		if (!directory_exists(buf))
 			make_directory(buf);
 
-		initdb_extra_opts_env = getenv("PG_TEST_INITDB_EXTRA_OPTS");
-
-		initStringInfo(&cmd);
-
-		/*
-		 * Create data directory.
-		 *
-		 * If available, use a previously initdb'd cluster as a template by
-		 * copying it. For a lot of tests, that's substantially cheaper.
-		 *
-		 * There's very similar code in Cluster.pm, but we can't easily de
-		 * duplicate it until we require perl at build time.
-		 */
-		initdb_template_dir = getenv("INITDB_TEMPLATE");
-		if (initdb_template_dir == NULL || nolocale || debug || initdb_extra_opts_env)
+		/* initdb */
+		snprintf(buf, sizeof(buf),
+				 "\"%s%sinitdb\" -D \"%s/data\" --no-clean --no-sync%s%s > \"%s/log/initdb.log\" 2>&1",
+				 bindir ? bindir : "",
+				 bindir ? "/" : "",
+				 temp_instance,
+				 debug ? " --debug" : "",
+				 nolocale ? " --no-locale" : "",
+				 outputdir);
+		fflush(NULL);
+		if (system(buf))
 		{
-			note("initializing database system by running initdb");
-
-			appendStringInfo(&cmd,
-							 "\"%s%sinitdb\" -D \"%s/data\" --no-clean --no-sync",
-							 bindir ? bindir : "",
-							 bindir ? "/" : "",
-							 temp_instance);
-			if (debug)
-				appendStringInfoString(&cmd, " --debug");
-			if (nolocale)
-				appendStringInfoString(&cmd, " --no-locale");
-			if (initdb_extra_opts_env)
-				appendStringInfo(&cmd, " %s", initdb_extra_opts_env);
-			appendStringInfo(&cmd, " > \"%s/log/initdb.log\" 2>&1", outputdir);
-			fflush(NULL);
-			if (system(cmd.data))
-			{
-				bail("initdb failed\n"
-					 "# Examine \"%s/log/initdb.log\" for the reason.\n"
-					 "# Command was: %s",
-					 outputdir, cmd.data);
-			}
+			bail("initdb failed\n"
+				 "# Examine \"%s/log/initdb.log\" for the reason.\n"
+				 "# Command was: %s",
+				 outputdir, buf);
 		}
-		else
-		{
-#ifndef WIN32
-			const char *copycmd = "cp -RPp \"%s\" \"%s/data\"";
-			int			expected_exitcode = 0;
-#else
-			const char *copycmd = "robocopy /E /NJS /NJH /NFL /NDL /NP \"%s\" \"%s/data\"";
-			int			expected_exitcode = 1;	/* 1 denotes files were copied */
-#endif
-
-			note("initializing database system by copying initdb template");
-
-			appendStringInfo(&cmd,
-							 copycmd,
-							 initdb_template_dir,
-							 temp_instance);
-			appendStringInfo(&cmd, " > \"%s/log/initdb.log\" 2>&1", outputdir);
-			fflush(NULL);
-			if (system(cmd.data) != expected_exitcode)
-			{
-				bail("copying of initdb template failed\n"
-					 "# Examine \"%s/log/initdb.log\" for the reason.\n"
-					 "# Command was: %s",
-					 outputdir, cmd.data);
-			}
-		}
-
-		pfree(cmd.data);
 
 		/*
 		 * Adjust the default postgresql.conf for regression testing. The user
@@ -2392,8 +2346,10 @@ regression_main(int argc, char *argv[],
 		snprintf(buf, sizeof(buf), "%s/data/postgresql.conf", temp_instance);
 		pg_conf = fopen(buf, "a");
 		if (pg_conf == NULL)
-			bail("could not open \"%s\" for adding extra config: %m", buf);
-
+		{
+			bail("could not open \"%s\" for adding extra config: %s",
+				 buf, strerror(errno));
+		}
 		fputs("\n# Configuration added by pg_regress\n\n", pg_conf);
 		fputs("log_autovacuum_min_duration = 0\n", pg_conf);
 		fputs("log_checkpoints = on\n", pg_conf);
@@ -2411,8 +2367,8 @@ regression_main(int argc, char *argv[],
 			extra_conf = fopen(temp_config, "r");
 			if (extra_conf == NULL)
 			{
-				bail("could not open \"%s\" to read extra config: %m",
-					 temp_config);
+				bail("could not open \"%s\" to read extra config: %s",
+					 temp_config, strerror(errno));
 			}
 			while (fgets(line_buf, sizeof(line_buf), extra_conf) != NULL)
 				fputs(line_buf, pg_conf);
@@ -2434,28 +2390,21 @@ regression_main(int argc, char *argv[],
 #endif
 
 		/*
-		 * Prepare the connection params for checking the state of the server
-		 * before starting the tests.
-		 */
-		sprintf(portstr, "%d", port);
-		keywords[0] = "dbname";
-		values[0] = "postgres";
-		keywords[1] = "port";
-		values[1] = portstr;
-		keywords[2] = "host";
-		values[2] = hostname ? hostname : sockdir;
-		keywords[3] = NULL;
-		values[3] = NULL;
-
-		/*
 		 * Check if there is a postmaster running already.
 		 */
+		snprintf(buf2, sizeof(buf2),
+				 "\"%s%spsql\" -X postgres <%s 2>%s",
+				 bindir ? bindir : "",
+				 bindir ? "/" : "",
+				 DEVNULL, DEVNULL);
+
 		for (i = 0; i < 16; i++)
 		{
-			rv = PQpingParams(keywords, values, 1);
-
-			if (rv == PQPING_OK)
+			fflush(NULL);
+			if (system(buf2) == 0)
 			{
+				char		s[16];
+
 				if (port_specified_by_user || i == 15)
 				{
 					note("port %d apparently in use", port);
@@ -2466,8 +2415,8 @@ regression_main(int argc, char *argv[],
 
 				note("port %d apparently in use, trying %d", port, port + 1);
 				port++;
-				sprintf(portstr, "%d", port);
-				setenv("PGPORT", portstr, 1);
+				sprintf(s, "%d", port);
+				setenv("PGPORT", s, 1);
 			}
 			else
 				break;
@@ -2487,14 +2436,14 @@ regression_main(int argc, char *argv[],
 				 outputdir);
 		postmaster_pid = spawn_process(buf);
 		if (postmaster_pid == INVALID_PID)
-			bail("could not spawn postmaster: %m");
+			bail("could not spawn postmaster: %s", strerror(errno));
 
 		/*
-		 * Wait till postmaster is able to accept connections; normally takes
-		 * only a fraction of a second or so, but Cygwin is reportedly *much*
-		 * slower, and test builds using Valgrind or similar tools might be
-		 * too.  Hence, allow the default timeout of 60 seconds to be
-		 * overridden from the PGCTLTIMEOUT environment variable.
+		 * Wait till postmaster is able to accept connections; normally this
+		 * is only a second or so, but Cygwin is reportedly *much* slower, and
+		 * test builds using Valgrind or similar tools might be too.  Hence,
+		 * allow the default timeout of 60 seconds to be overridden from the
+		 * PGCTLTIMEOUT environment variable.
 		 */
 		env_wait = getenv("PGCTLTIMEOUT");
 		if (env_wait != NULL)
@@ -2506,23 +2455,12 @@ regression_main(int argc, char *argv[],
 		else
 			wait_seconds = 60;
 
-		for (i = 0; i < wait_seconds * WAIT_TICKS_PER_SECOND; i++)
+		for (i = 0; i < wait_seconds; i++)
 		{
-			/*
-			 * It's fairly unlikely that the server is responding immediately
-			 * so we start with sleeping before checking instead of the other
-			 * way around.
-			 */
-			pg_usleep(1000000L / WAIT_TICKS_PER_SECOND);
-
-			rv = PQpingParams(keywords, values, 1);
-
-			/* Done if the server is running and accepts connections */
-			if (rv == PQPING_OK)
+			/* Done if psql succeeds */
+			fflush(NULL);
+			if (system(buf2) == 0)
 				break;
-
-			if (rv == PQPING_NO_ATTEMPT)
-				bail("attempting to connect to postmaster failed");
 
 			/*
 			 * Fail immediately if postmaster has exited
@@ -2536,8 +2474,10 @@ regression_main(int argc, char *argv[],
 				bail("postmaster failed, examine \"%s/log/postmaster.log\" for the reason",
 					 outputdir);
 			}
+
+			pg_usleep(1000000L);
 		}
-		if (i >= wait_seconds * WAIT_TICKS_PER_SECOND)
+		if (i >= wait_seconds)
 		{
 			diag("postmaster did not respond within %d seconds, examine \"%s/log/postmaster.log\" for the reason",
 				 wait_seconds, outputdir);
@@ -2550,7 +2490,7 @@ regression_main(int argc, char *argv[],
 			 */
 #ifndef WIN32
 			if (kill(postmaster_pid, SIGKILL) != 0 && errno != ESRCH)
-				bail("could not kill failed postmaster: %m");
+				bail("could not kill failed postmaster: %s", strerror(errno));
 #else
 			if (TerminateProcess(postmaster_pid, 255) == 0)
 				bail("could not kill failed postmaster: error code %lu",

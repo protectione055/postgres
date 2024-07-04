@@ -8,7 +8,7 @@
  * operations such as pfree() and repalloc() to work correctly on a memory
  * chunk that was allocated by palloc_aligned().
  *
- * Portions Copyright (c) 2022-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2022-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/utils/mmgr/alignedalloc.c
@@ -57,7 +57,7 @@ AlignedAllocFree(void *pointer)
  *		memory will be uninitialized.
  */
 void *
-AlignedAllocRealloc(void *pointer, Size size, int flags)
+AlignedAllocRealloc(void *pointer, Size size)
 {
 	MemoryChunk *redirchunk = PointerGetMemoryChunk(pointer);
 	Size		alignto;
@@ -97,17 +97,14 @@ AlignedAllocRealloc(void *pointer, Size size, int flags)
 #endif
 
 	ctx = GetMemoryChunkContext(unaligned);
-	newptr = MemoryContextAllocAligned(ctx, size, alignto, flags);
+	newptr = MemoryContextAllocAligned(ctx, size, alignto, 0);
 
 	/*
 	 * We may memcpy beyond the end of the original allocation request size,
 	 * so we must mark the entire allocation as defined.
 	 */
-	if (likely(newptr != NULL))
-	{
-		VALGRIND_MAKE_MEM_DEFINED(pointer, old_size);
-		memcpy(newptr, pointer, Min(size, old_size));
-	}
+	VALGRIND_MAKE_MEM_DEFINED(pointer, old_size);
+	memcpy(newptr, pointer, Min(size, old_size));
 	pfree(unaligned);
 
 	return newptr;

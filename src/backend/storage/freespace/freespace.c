@@ -4,7 +4,7 @@
  *	  POSTGRES free space map for quickly finding free space in relations
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -29,8 +29,8 @@
 #include "miscadmin.h"
 #include "storage/freespace.h"
 #include "storage/fsm_internals.h"
+#include "storage/lmgr.h"
 #include "storage/smgr.h"
-#include "utils/rel.h"
 
 
 /*
@@ -555,7 +555,14 @@ fsm_readbuf(Relation rel, FSMAddress addr, bool extend)
 {
 	BlockNumber blkno = fsm_logical_to_physical(addr);
 	Buffer		buf;
-	SMgrRelation reln = RelationGetSmgr(rel);
+	SMgrRelation reln;
+
+	/*
+	 * Caution: re-using this smgr pointer could fail if the relcache entry
+	 * gets closed.  It's safe as long as we only do smgr-level operations
+	 * between here and the last use of the pointer.
+	 */
+	reln = RelationGetSmgr(rel);
 
 	/*
 	 * If we haven't cached the size of the FSM yet, check it first.  Also

@@ -1,12 +1,12 @@
 
-# Copyright (c) 2021-2024, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 #
 # pgbench tests which do not need a server
 #
 
 use strict;
-use warnings FATAL => 'all';
+use warnings;
 
 use PostgreSQL::Test::Utils;
 use Test::More;
@@ -38,6 +38,7 @@ sub pgbench_scripts
 
 	my ($opts, $stat, $out, $err, $name, $files) = @_;
 	my @cmd = ('pgbench', split /\s+/, $opts);
+	my @filenames = ();
 	if (defined $files)
 	{
 		for my $fn (sort keys %$files)
@@ -66,7 +67,7 @@ my @options = (
 	# name, options, stderr checks
 	[
 		'bad option',
-		'-h home -p 5432 -U calvin ---debug --bad-option',
+		'-h home -p 5432 -U calvin -d --bad-option',
 		[qr{--help.*more information}]
 	],
 	[

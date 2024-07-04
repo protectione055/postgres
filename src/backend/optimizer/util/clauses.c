@@ -3,7 +3,7 @@
  * clauses.c
  *	  routines to manipulate qualification clauses
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -20,6 +20,8 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "catalog/pg_aggregate.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_language.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_proc.h"
@@ -39,6 +41,7 @@
 #include "optimizer/plancat.h"
 #include "optimizer/planmain.h"
 #include "parser/analyze.h"
+#include "parser/parse_agg.h"
 #include "parser/parse_coerce.h"
 #include "parser/parse_func.h"
 #include "rewrite/rewriteHandler.h"
@@ -50,7 +53,6 @@
 #include "utils/fmgroids.h"
 #include "utils/json.h"
 #include "utils/jsonb.h"
-#include "utils/jsonpath.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
@@ -413,25 +415,6 @@ contain_mutable_functions_walker(Node *node, void *context)
 		}
 
 		/* Check all subnodes */
-	}
-
-	if (IsA(node, JsonExpr))
-	{
-		JsonExpr   *jexpr = castNode(JsonExpr, node);
-		Const	   *cnst;
-
-		if (!IsA(jexpr->path_spec, Const))
-			return true;
-
-		cnst = castNode(Const, jexpr->path_spec);
-
-		Assert(cnst->consttype == JSONPATHOID);
-		if (cnst->constisnull)
-			return false;
-
-		if (jspIsMutable(DatumGetJsonPathP(cnst->constvalue),
-						 jexpr->passing_names, jexpr->passing_values))
-			return true;
 	}
 
 	if (IsA(node, SQLValueFunction))
@@ -2566,7 +2549,6 @@ eval_const_expressions_mutator(Node *node,
 				newexpr->inputcollid = expr->inputcollid;
 				newexpr->args = args;
 				newexpr->aggfilter = aggfilter;
-				newexpr->runCondition = expr->runCondition;
 				newexpr->winref = expr->winref;
 				newexpr->winstar = expr->winstar;
 				newexpr->winagg = expr->winagg;
@@ -4725,10 +4707,10 @@ inline_function(Oid funcid, Oid result_type, Oid result_collid,
 	 * needed; that's probably not important, but let's be careful.
 	 */
 	querytree_list = list_make1(querytree);
-	if (check_sql_fn_retval(list_make1(querytree_list),
-							result_type, rettupdesc,
-							funcform->prokind,
-							false, NULL))
+	if (check_sql_fn_retval_ext(list_make1(querytree_list),
+								result_type, rettupdesc,
+								funcform->prokind,
+								false, NULL))
 		goto fail;				/* reject whole-tuple-result cases */
 
 	/*
@@ -5272,10 +5254,10 @@ inline_set_returning_function(PlannerInfo *root, RangeTblEntry *rte)
 	 * shows it's returning a whole tuple result; otherwise what it's
 	 * returning is a single composite column which is not what we need.
 	 */
-	if (!check_sql_fn_retval(list_make1(querytree_list),
-							 fexpr->funcresulttype, rettupdesc,
-							 funcform->prokind,
-							 true, NULL) &&
+	if (!check_sql_fn_retval_ext(list_make1(querytree_list),
+								 fexpr->funcresulttype, rettupdesc,
+								 funcform->prokind,
+								 true, NULL) &&
 		(functypclass == TYPEFUNC_COMPOSITE ||
 		 functypclass == TYPEFUNC_COMPOSITE_DOMAIN ||
 		 functypclass == TYPEFUNC_RECORD))

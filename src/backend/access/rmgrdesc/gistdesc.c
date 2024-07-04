@@ -3,7 +3,7 @@
  * gistdesc.c
  *	  rmgr descriptor routines for access/gist/gistxlog.c
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -16,6 +16,7 @@
 
 #include "access/gistxlog.h"
 #include "lib/stringinfo.h"
+#include "storage/relfilelocator.h"
 
 static void
 out_gistxlogPageUpdate(StringInfo buf, gistxlogPageUpdate *xlrec)
@@ -25,20 +26,18 @@ out_gistxlogPageUpdate(StringInfo buf, gistxlogPageUpdate *xlrec)
 static void
 out_gistxlogPageReuse(StringInfo buf, gistxlogPageReuse *xlrec)
 {
-	appendStringInfo(buf, "rel %u/%u/%u; blk %u; snapshotConflictHorizon %u:%u, isCatalogRel %c",
+	appendStringInfo(buf, "rel %u/%u/%u; blk %u; snapshotConflictHorizon %u:%u",
 					 xlrec->locator.spcOid, xlrec->locator.dbOid,
 					 xlrec->locator.relNumber, xlrec->block,
 					 EpochFromFullTransactionId(xlrec->snapshotConflictHorizon),
-					 XidFromFullTransactionId(xlrec->snapshotConflictHorizon),
-					 xlrec->isCatalogRel ? 'T' : 'F');
+					 XidFromFullTransactionId(xlrec->snapshotConflictHorizon));
 }
 
 static void
 out_gistxlogDelete(StringInfo buf, gistxlogDelete *xlrec)
 {
-	appendStringInfo(buf, "delete: snapshotConflictHorizon %u, nitems: %u, isCatalogRel %c",
-					 xlrec->snapshotConflictHorizon, xlrec->ntodelete,
-					 xlrec->isCatalogRel ? 'T' : 'F');
+	appendStringInfo(buf, "delete: snapshotConflictHorizon %u, nitems: %u",
+					 xlrec->snapshotConflictHorizon, xlrec->ntodelete);
 }
 
 static void

@@ -3,7 +3,7 @@
  * fmgr.c
  *	  The Postgres function manager.
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -612,9 +612,7 @@ struct fmgr_security_definer_cache
 {
 	FmgrInfo	flinfo;			/* lookup info for target function */
 	Oid			userid;			/* userid to set, or InvalidOid */
-	List	   *configNames;	/* GUC names to set, or NIL */
-	List	   *configHandles;	/* GUC handles to set, or NIL */
-	List	   *configValues;	/* GUC values to set, or NIL */
+	ArrayType  *proconfig;		/* GUC values to set, or NULL */
 	Datum		arg;			/* passthrough argument for plugin modules */
 };
 
@@ -636,9 +634,6 @@ fmgr_security_definer(PG_FUNCTION_ARGS)
 	FmgrInfo   *save_flinfo;
 	Oid			save_userid;
 	int			save_sec_context;
-	ListCell   *lc1,
-			   *lc2,
-			   *lc3;
 	volatile int save_nestlevel;
 	PgStat_FunctionCallUsage fcusage;
 
@@ -671,24 +666,8 @@ fmgr_security_definer(PG_FUNCTION_ARGS)
 								&isnull);
 		if (!isnull)
 		{
-			ArrayType  *array;
-			ListCell   *lc;
-
 			oldcxt = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
-			array = DatumGetArrayTypeP(datum);
-			TransformGUCArray(array, &fcache->configNames,
-							  &fcache->configValues);
-
-			/* transform names to config handles to avoid lookup cost */
-			fcache->configHandles = NIL;
-			foreach(lc, fcache->configNames)
-			{
-				char	   *name = (char *) lfirst(lc);
-
-				fcache->configHandles = lappend(fcache->configHandles,
-												get_config_handle(name));
-			}
-
+			fcache->proconfig = DatumGetArrayTypePCopy(datum);
 			MemoryContextSwitchTo(oldcxt);
 		}
 
@@ -701,7 +680,7 @@ fmgr_security_definer(PG_FUNCTION_ARGS)
 
 	/* GetUserIdAndSecContext is cheap enough that no harm in a wasted call */
 	GetUserIdAndSecContext(&save_userid, &save_sec_context);
-	if (fcache->configNames != NIL) /* Need a new GUC nesting level */
+	if (fcache->proconfig)		/* Need a new GUC nesting level */
 		save_nestlevel = NewGUCNestLevel();
 	else
 		save_nestlevel = 0;		/* keep compiler quiet */
@@ -710,20 +689,12 @@ fmgr_security_definer(PG_FUNCTION_ARGS)
 		SetUserIdAndSecContext(fcache->userid,
 							   save_sec_context | SECURITY_LOCAL_USERID_CHANGE);
 
-	forthree(lc1, fcache->configNames,
-			 lc2, fcache->configHandles,
-			 lc3, fcache->configValues)
+	if (fcache->proconfig)
 	{
-		GucContext	context = superuser() ? PGC_SUSET : PGC_USERSET;
-		GucSource	source = PGC_S_SESSION;
-		GucAction	action = GUC_ACTION_SAVE;
-		char	   *name = lfirst(lc1);
-		config_handle *handle = lfirst(lc2);
-		char	   *value = lfirst(lc3);
-
-		(void) set_config_with_handle(name, handle, value,
-									  context, source, GetUserId(),
-									  action, true, 0, false);
+		ProcessGUCArray(fcache->proconfig,
+						(superuser() ? PGC_SUSET : PGC_USERSET),
+						PGC_S_SESSION,
+						GUC_ACTION_SAVE);
 	}
 
 	/* function manager hook */
@@ -766,7 +737,7 @@ fmgr_security_definer(PG_FUNCTION_ARGS)
 
 	fcinfo->flinfo = save_flinfo;
 
-	if (fcache->configNames != NIL)
+	if (fcache->proconfig)
 		AtEOXact_GUC(true, save_nestlevel);
 	if (OidIsValid(fcache->userid))
 		SetUserIdAndSecContext(save_userid, save_sec_context);

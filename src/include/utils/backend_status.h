@@ -2,7 +2,7 @@
  * backend_status.h
  *	  Definitions related to backend status reporting
  *
- * Copyright (c) 2001-2024, PostgreSQL Global Development Group
+ * Copyright (c) 2001-2023, PostgreSQL Global Development Group
  *
  * src/include/utils/backend_status.h
  * ----------
@@ -13,7 +13,7 @@
 #include "datatype/timestamp.h"
 #include "libpq/pqcomm.h"
 #include "miscadmin.h"			/* for BackendType */
-#include "storage/procnumber.h"
+#include "storage/backendid.h"
 #include "utils/backend_progress.h"
 
 
@@ -29,7 +29,7 @@ typedef enum BackendState
 	STATE_IDLEINTRANSACTION,
 	STATE_FASTPATH,
 	STATE_IDLEINTRANSACTION_ABORTED,
-	STATE_DISABLED,
+	STATE_DISABLED
 } BackendState;
 
 
@@ -87,7 +87,7 @@ typedef struct PgBackendGSSStatus
  *
  * Each live backend maintains a PgBackendStatus struct in shared memory
  * showing its current activity.  (The structs are allocated according to
- * ProcNumber, but that is not critical.)  Note that this is unrelated to the
+ * BackendId, but that is not critical.)  Note that this is unrelated to the
  * cumulative stats system (i.e. pgstat.c et al).
  *
  * Each auxiliary process also maintains a PgBackendStatus struct in shared
@@ -250,9 +250,11 @@ typedef struct LocalPgBackendStatus
 	PgBackendStatus backendStatus;
 
 	/*
-	 * The proc number.
+	 * The backend ID.  For auxiliary processes, this will be set to a value
+	 * greater than MaxBackends (since auxiliary processes do not have proper
+	 * backend IDs).
 	 */
-	ProcNumber	proc_number;
+	BackendId	backend_id;
 
 	/*
 	 * The xid of the current transaction if available, InvalidTransactionId
@@ -331,8 +333,8 @@ extern uint64 pgstat_get_my_query_id(void);
  * ----------
  */
 extern int	pgstat_fetch_stat_numbackends(void);
-extern PgBackendStatus *pgstat_get_beentry_by_proc_number(ProcNumber procNumber);
-extern LocalPgBackendStatus *pgstat_get_local_beentry_by_proc_number(ProcNumber procNumber);
+extern PgBackendStatus *pgstat_get_beentry_by_backend_id(BackendId beid);
+extern LocalPgBackendStatus *pgstat_get_local_beentry_by_backend_id(BackendId beid);
 extern LocalPgBackendStatus *pgstat_get_local_beentry_by_index(int idx);
 extern char *pgstat_clip_activity(const char *raw_activity);
 

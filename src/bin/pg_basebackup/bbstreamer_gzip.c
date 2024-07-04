@@ -2,7 +2,7 @@
  *
  * bbstreamer_gzip.c
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/bbstreamer_gzip.c
@@ -18,8 +18,8 @@
 #endif
 
 #include "bbstreamer.h"
-#include "common/file_perm.h"
 #include "common/logging.h"
+#include "common/file_perm.h"
 #include "common/string.h"
 
 #ifdef HAVE_LIBZ
@@ -45,7 +45,7 @@ static void bbstreamer_gzip_writer_finalize(bbstreamer *streamer);
 static void bbstreamer_gzip_writer_free(bbstreamer *streamer);
 static const char *get_gz_error(gzFile gzf);
 
-static const bbstreamer_ops bbstreamer_gzip_writer_ops = {
+const bbstreamer_ops bbstreamer_gzip_writer_ops = {
 	.content = bbstreamer_gzip_writer_content,
 	.finalize = bbstreamer_gzip_writer_finalize,
 	.free = bbstreamer_gzip_writer_free
@@ -60,7 +60,7 @@ static void bbstreamer_gzip_decompressor_free(bbstreamer *streamer);
 static void *gzip_palloc(void *opaque, unsigned items, unsigned size);
 static void gzip_pfree(void *opaque, void *address);
 
-static const bbstreamer_ops bbstreamer_gzip_decompressor_ops = {
+const bbstreamer_ops bbstreamer_gzip_decompressor_ops = {
 	.content = bbstreamer_gzip_decompressor_content,
 	.finalize = bbstreamer_gzip_decompressor_finalize,
 	.free = bbstreamer_gzip_decompressor_free
@@ -269,7 +269,7 @@ bbstreamer_gzip_decompressor_content(bbstreamer *streamer,
 	mystreamer = (bbstreamer_gzip_decompressor *) streamer;
 
 	zs = &mystreamer->zstream;
-	zs->next_in = (const uint8 *) data;
+	zs->next_in = (uint8 *) data;
 	zs->avail_in = len;
 
 	/* Process the current chunk */

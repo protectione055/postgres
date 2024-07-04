@@ -3,7 +3,7 @@
  * alter.c
  *	  Drivers for generic alter commands
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -16,6 +16,7 @@
 
 #include "access/htup_details.h"
 #include "access/relation.h"
+#include "access/sysattr.h"
 #include "access/table.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
@@ -32,7 +33,6 @@
 #include "catalog/pg_largeobject_metadata.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_opclass.h"
-#include "catalog/pg_operator.h"
 #include "catalog/pg_opfamily.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_statistic_ext.h"
@@ -43,11 +43,13 @@
 #include "catalog/pg_ts_template.h"
 #include "commands/alter.h"
 #include "commands/collationcmds.h"
+#include "commands/conversioncmds.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
 #include "commands/event_trigger.h"
 #include "commands/extension.h"
 #include "commands/policy.h"
+#include "commands/proclang.h"
 #include "commands/publicationcmds.h"
 #include "commands/schemacmds.h"
 #include "commands/subscriptioncmds.h"
@@ -57,10 +59,12 @@
 #include "commands/typecmds.h"
 #include "commands/user.h"
 #include "miscadmin.h"
+#include "parser/parse_func.h"
 #include "replication/logicalworker.h"
 #include "rewrite/rewriteDefine.h"
-#include "utils/acl.h"
+#include "tcop/utility.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
@@ -291,8 +295,7 @@ AlterObjectRename_internal(Relation rel, Oid objectId, const char *new_name)
 	}
 	else if (classId == SubscriptionRelationId)
 	{
-		if (SearchSysCacheExists2(SUBSCRIPTIONNAME,
-								  ObjectIdGetDatum(MyDatabaseId),
+		if (SearchSysCacheExists2(SUBSCRIPTIONNAME, MyDatabaseId,
 								  CStringGetDatum(new_name)))
 			report_name_conflict(classId, new_name);
 
@@ -598,26 +601,32 @@ ExecAlterObjectSchemaStmt(AlterObjectSchemaStmt *stmt,
 /*
  * Change an object's namespace given its classOid and object Oid.
  *
- * Objects that don't have a namespace should be ignored, as should
- * dependent types such as array types.
+ * Objects that don't have a namespace should be ignored.
  *
  * This function is currently used only by ALTER EXTENSION SET SCHEMA,
- * so it only needs to cover object kinds that can be members of an
- * extension, and it can silently ignore dependent types --- we assume
- * those will be moved when their parent object is moved.
+ * so it only needs to cover object types that can be members of an
+ * extension, and it doesn't have to deal with certain special cases
+ * such as not wanting to process array types --- those should never
+ * be direct members of an extension anyway.  Nonetheless, we insist
+ * on listing all OCLASS types in the switch.
  *
  * Returns the OID of the object's previous namespace, or InvalidOid if
- * object doesn't have a schema or was ignored due to being a dependent type.
+ * object doesn't have a schema.
  */
 Oid
 AlterObjectNamespace_oid(Oid classId, Oid objid, Oid nspOid,
 						 ObjectAddresses *objsMoved)
 {
 	Oid			oldNspOid = InvalidOid;
+	ObjectAddress dep;
 
-	switch (classId)
+	dep.classId = classId;
+	dep.objectId = objid;
+	dep.objectSubId = 0;
+
+	switch (getObjectClass(&dep))
 	{
-		case RelationRelationId:
+		case OCLASS_CLASS:
 			{
 				Relation	rel;
 
@@ -630,21 +639,21 @@ AlterObjectNamespace_oid(Oid classId, Oid objid, Oid nspOid,
 				break;
 			}
 
-		case TypeRelationId:
-			oldNspOid = AlterTypeNamespace_oid(objid, nspOid, true, objsMoved);
+		case OCLASS_TYPE:
+			oldNspOid = AlterTypeNamespace_oid(objid, nspOid, objsMoved);
 			break;
 
-		case ProcedureRelationId:
-		case CollationRelationId:
-		case ConversionRelationId:
-		case OperatorRelationId:
-		case OperatorClassRelationId:
-		case OperatorFamilyRelationId:
-		case StatisticExtRelationId:
-		case TSParserRelationId:
-		case TSDictionaryRelationId:
-		case TSTemplateRelationId:
-		case TSConfigRelationId:
+		case OCLASS_PROC:
+		case OCLASS_COLLATION:
+		case OCLASS_CONVERSION:
+		case OCLASS_OPERATOR:
+		case OCLASS_OPCLASS:
+		case OCLASS_OPFAMILY:
+		case OCLASS_STATISTIC_EXT:
+		case OCLASS_TSPARSER:
+		case OCLASS_TSDICT:
+		case OCLASS_TSTEMPLATE:
+		case OCLASS_TSCONFIG:
 			{
 				Relation	catalog;
 
@@ -657,9 +666,41 @@ AlterObjectNamespace_oid(Oid classId, Oid objid, Oid nspOid,
 			}
 			break;
 
-		default:
+		case OCLASS_CAST:
+		case OCLASS_CONSTRAINT:
+		case OCLASS_DEFAULT:
+		case OCLASS_LANGUAGE:
+		case OCLASS_LARGEOBJECT:
+		case OCLASS_AM:
+		case OCLASS_AMOP:
+		case OCLASS_AMPROC:
+		case OCLASS_REWRITE:
+		case OCLASS_TRIGGER:
+		case OCLASS_SCHEMA:
+		case OCLASS_ROLE:
+		case OCLASS_ROLE_MEMBERSHIP:
+		case OCLASS_DATABASE:
+		case OCLASS_TBLSPACE:
+		case OCLASS_FDW:
+		case OCLASS_FOREIGN_SERVER:
+		case OCLASS_USER_MAPPING:
+		case OCLASS_DEFACL:
+		case OCLASS_EXTENSION:
+		case OCLASS_EVENT_TRIGGER:
+		case OCLASS_PARAMETER_ACL:
+		case OCLASS_POLICY:
+		case OCLASS_PUBLICATION:
+		case OCLASS_PUBLICATION_NAMESPACE:
+		case OCLASS_PUBLICATION_REL:
+		case OCLASS_SUBSCRIPTION:
+		case OCLASS_TRANSFORM:
 			/* ignore object types that don't have schema-qualified names */
-			Assert(get_object_attnum_namespace(classId) == InvalidAttrNumber);
+			break;
+
+			/*
+			 * There's intentionally no default: case here; we want the
+			 * compiler to warn if a new OCLASS hasn't been handled above.
+			 */
 	}
 
 	return oldNspOid;
@@ -806,11 +847,9 @@ AlterObjectNamespace_internal(Relation rel, Oid objid, Oid nspOid)
 	pfree(nulls);
 	pfree(replaces);
 
-	/* update dependency to point to the new schema */
-	if (changeDependencyFor(classId, objid,
-							NamespaceRelationId, oldNspOid, nspOid) != 1)
-		elog(ERROR, "could not change schema dependency for object %u",
-			 objid);
+	/* update dependencies to point to the new schema */
+	changeDependencyFor(classId, objid,
+						NamespaceRelationId, oldNspOid, nspOid);
 
 	InvokeObjectPostAlterHook(classId, objid, 0);
 
@@ -876,7 +915,9 @@ ExecAlterOwnerStmt(AlterOwnerStmt *stmt)
 		case OBJECT_TSDICTIONARY:
 		case OBJECT_TSCONFIGURATION:
 			{
+				Relation	catalog;
 				Relation	relation;
+				Oid			classId;
 				ObjectAddress address;
 
 				address = get_object_address(stmt->objectType,
@@ -885,9 +926,19 @@ ExecAlterOwnerStmt(AlterOwnerStmt *stmt)
 											 AccessExclusiveLock,
 											 false);
 				Assert(relation == NULL);
+				classId = address.classId;
 
-				AlterObjectOwner_internal(address.classId, address.objectId,
-										  newowner);
+				/*
+				 * For large objects, the catalog to modify is
+				 * pg_largeobject_metadata
+				 */
+				if (classId == LargeObjectRelationId)
+					classId = LargeObjectMetadataRelationId;
+
+				catalog = table_open(classId, RowExclusiveLock);
+
+				AlterObjectOwner_internal(catalog, address.objectId, newowner);
+				table_close(catalog, RowExclusiveLock);
 
 				return address;
 			}
@@ -905,31 +956,24 @@ ExecAlterOwnerStmt(AlterOwnerStmt *stmt)
  * cases (won't work for tables, nor other cases where we need to do more than
  * change the ownership column of a single catalog entry).
  *
- * classId: OID of catalog containing object
+ * rel: catalog relation containing object (RowExclusiveLock'd by caller)
  * objectId: OID of object to change the ownership of
  * new_ownerId: OID of new object owner
- *
- * This will work on large objects, but we have to beware of the fact that
- * classId isn't the OID of the catalog to modify in that case.
  */
 void
-AlterObjectOwner_internal(Oid classId, Oid objectId, Oid new_ownerId)
+AlterObjectOwner_internal(Relation rel, Oid objectId, Oid new_ownerId)
 {
-	/* For large objects, the catalog to modify is pg_largeobject_metadata */
-	Oid			catalogId = (classId == LargeObjectRelationId) ? LargeObjectMetadataRelationId : classId;
-	AttrNumber	Anum_oid = get_object_attnum_oid(catalogId);
-	AttrNumber	Anum_owner = get_object_attnum_owner(catalogId);
-	AttrNumber	Anum_namespace = get_object_attnum_namespace(catalogId);
-	AttrNumber	Anum_acl = get_object_attnum_acl(catalogId);
-	AttrNumber	Anum_name = get_object_attnum_name(catalogId);
-	Relation	rel;
+	Oid			classId = RelationGetRelid(rel);
+	AttrNumber	Anum_oid = get_object_attnum_oid(classId);
+	AttrNumber	Anum_owner = get_object_attnum_owner(classId);
+	AttrNumber	Anum_namespace = get_object_attnum_namespace(classId);
+	AttrNumber	Anum_acl = get_object_attnum_acl(classId);
+	AttrNumber	Anum_name = get_object_attnum_name(classId);
 	HeapTuple	oldtup;
 	Datum		datum;
 	bool		isnull;
 	Oid			old_ownerId;
 	Oid			namespaceId = InvalidOid;
-
-	rel = table_open(catalogId, RowExclusiveLock);
 
 	oldtup = get_catalog_object_by_oid(rel, Anum_oid, objectId);
 	if (oldtup == NULL)
@@ -978,8 +1022,7 @@ AlterObjectOwner_internal(Oid classId, Oid objectId, Oid new_ownerId)
 					snprintf(namebuf, sizeof(namebuf), "%u", objectId);
 					objname = namebuf;
 				}
-				aclcheck_error(ACLCHECK_NOT_OWNER,
-							   get_object_type(catalogId, objectId),
+				aclcheck_error(ACLCHECK_NOT_OWNER, get_object_type(classId, objectId),
 							   objname);
 			}
 			/* Must be able to become new owner */
@@ -1031,7 +1074,14 @@ AlterObjectOwner_internal(Oid classId, Oid objectId, Oid new_ownerId)
 		/* Perform actual update */
 		CatalogTupleUpdate(rel, &newtup->t_self, newtup);
 
-		/* Update owner dependency reference */
+		/*
+		 * Update owner dependency reference.  When working on a large object,
+		 * we have to translate back to the OID conventionally used for LOs'
+		 * classId.
+		 */
+		if (classId == LargeObjectMetadataRelationId)
+			classId = LargeObjectRelationId;
+
 		changeDependencyOnOwner(classId, objectId, new_ownerId);
 
 		/* Release memory */
@@ -1039,9 +1089,16 @@ AlterObjectOwner_internal(Oid classId, Oid objectId, Oid new_ownerId)
 		pfree(nulls);
 		pfree(replaces);
 	}
+	else
+	{
+		/*
+		 * No need to change anything.  But when working on a large object, we
+		 * have to translate back to the OID conventionally used for LOs'
+		 * classId, or the post-alter hook (if any) will get confused.
+		 */
+		if (classId == LargeObjectMetadataRelationId)
+			classId = LargeObjectRelationId;
+	}
 
-	/* Note the post-alter hook gets classId not catalogId */
 	InvokeObjectPostAlterHook(classId, objectId, 0);
-
-	table_close(rel, RowExclusiveLock);
 }

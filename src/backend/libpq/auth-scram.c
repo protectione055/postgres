@@ -80,7 +80,7 @@
  * general, after logging in, but let's do what we can here.
  *
  *
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/libpq/auth-scram.c
@@ -92,15 +92,20 @@
 #include <unistd.h>
 
 #include "access/xlog.h"
+#include "catalog/pg_authid.h"
 #include "catalog/pg_control.h"
 #include "common/base64.h"
 #include "common/hmac.h"
 #include "common/saslprep.h"
 #include "common/scram-common.h"
 #include "common/sha2.h"
+#include "libpq/auth.h"
 #include "libpq/crypt.h"
 #include "libpq/sasl.h"
 #include "libpq/scram.h"
+#include "miscadmin.h"
+#include "utils/builtins.h"
+#include "utils/timestamp.h"
 
 static void scram_get_mechanisms(Port *port, StringInfo buf);
 static void *scram_init(Port *port, const char *selected_mech,
@@ -124,7 +129,7 @@ typedef enum
 {
 	SCRAM_AUTH_INIT,
 	SCRAM_AUTH_SALT_SENT,
-	SCRAM_AUTH_FINISHED,
+	SCRAM_AUTH_FINISHED
 } scram_state_enum;
 
 typedef struct
@@ -204,9 +209,10 @@ scram_get_mechanisms(Port *port, StringInfo buf)
 	/*
 	 * Advertise the mechanisms in decreasing order of importance.  So the
 	 * channel-binding variants go first, if they are supported.  Channel
-	 * binding is only supported with SSL.
+	 * binding is only supported with SSL, and only if the SSL implementation
+	 * has a function to get the certificate's hash.
 	 */
-#ifdef USE_SSL
+#ifdef HAVE_BE_TLS_GET_CERTIFICATE_HASH
 	if (port->ssl_in_use)
 	{
 		appendStringInfoString(buf, SCRAM_SHA_256_PLUS_NAME);
@@ -245,12 +251,13 @@ scram_init(Port *port, const char *selected_mech, const char *shadow_pass)
 	/*
 	 * Parse the selected mechanism.
 	 *
-	 * Note that if we don't support channel binding, or if we're not using
-	 * SSL at all, we would not have advertised the PLUS variant in the first
-	 * place.  If the client nevertheless tries to select it, it's a protocol
-	 * violation like selecting any other SASL mechanism we don't support.
+	 * Note that if we don't support channel binding, either because the SSL
+	 * implementation doesn't support it or we're not using SSL at all, we
+	 * would not have advertised the PLUS variant in the first place.  If the
+	 * client nevertheless tries to select it, it's a protocol violation like
+	 * selecting any other SASL mechanism we don't support.
 	 */
-#ifdef USE_SSL
+#ifdef HAVE_BE_TLS_GET_CERTIFICATE_HASH
 	if (strcmp(selected_mech, SCRAM_SHA_256_PLUS_NAME) == 0 && port->ssl_in_use)
 		state->channel_binding_in_use = true;
 	else
@@ -1003,7 +1010,7 @@ read_client_first_message(scram_state *state, const char *input)
 						 errmsg("malformed SCRAM message"),
 						 errdetail("The client selected SCRAM-SHA-256-PLUS, but the SCRAM message does not include channel binding data.")));
 
-#ifdef USE_SSL
+#ifdef HAVE_BE_TLS_GET_CERTIFICATE_HASH
 			if (state->port->ssl_in_use)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
@@ -1299,7 +1306,7 @@ read_client_final_message(scram_state *state, const char *input)
 	channel_binding = read_attr_value(&p, 'c');
 	if (state->channel_binding_in_use)
 	{
-#ifdef USE_SSL
+#ifdef HAVE_BE_TLS_GET_CERTIFICATE_HASH
 		const char *cbind_data = NULL;
 		size_t		cbind_data_len = 0;
 		size_t		cbind_header_len;
