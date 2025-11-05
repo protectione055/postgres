@@ -1490,6 +1490,192 @@ SELECT ft1.c1 FROM ft1 JOIN ft2 on ft1.c1 = ft2.c1 WHERE
 	ORDER BY ft1.c1 LIMIT 5;
 
 -- ===================================================================
+-- test ANTI-JOIN pushdown
+-- ===================================================================
+EXPLAIN (verbose, costs off)
+SELECT ft2.*, ft4.* FROM ft2 INNER JOIN ft4 ON ft2.c2 = ft4.c1
+	WHERE ft2.c1 > 900
+	AND NOT EXISTS (SELECT 1 FROM ft1 WHERE ft1.c1 = ft4.c1)
+	ORDER BY ft2.c1;
+SELECT ft2.*, ft4.* FROM ft2 INNER JOIN ft4 ON ft2.c2 = ft4.c1
+	WHERE ft2.c1 > 900
+	AND NOT EXISTS (SELECT 1 FROM ft1 WHERE ft1.c1 = ft4.c1)
+	ORDER BY ft2.c1;
+
+-- The same query, different join order
+EXPLAIN (verbose, costs off)
+SELECT ft2.*, ft4.* FROM ft2 INNER JOIN
+	(SELECT * FROM ft4 WHERE
+	NOT EXISTS (SELECT 1 FROM ft1 WHERE ft1.c1 = ft4.c1)) ft4
+	ON ft2.c2 = ft4.c1
+	WHERE ft2.c1 > 900
+	ORDER BY ft2.c1;
+SELECT ft2.*, ft4.* FROM ft2 INNER JOIN
+	(SELECT * FROM ft4 WHERE
+	NOT EXISTS (SELECT 1 FROM ft1 WHERE ft1.c1 = ft4.c1)) ft4
+	ON ft2.c2 = ft4.c1
+	WHERE ft2.c1 > 900
+	ORDER BY ft2.c1;
+
+-- Left join
+EXPLAIN (verbose, costs off)
+SELECT ft2.*, ft4.* FROM ft2 LEFT JOIN
+	(SELECT * FROM ft4 WHERE
+	NOT EXISTS (SELECT 1 FROM ft1 WHERE ft1.c1 = ft4.c1)) ft4
+	ON ft2.c2 = ft4.c1
+	WHERE ft2.c1 > 900
+	ORDER BY ft2.c1 LIMIT 10;
+SELECT ft2.*, ft4.* FROM ft2 LEFT JOIN
+	(SELECT * FROM ft4 WHERE
+	NOT EXISTS (SELECT 1 FROM ft1 WHERE ft1.c1 = ft4.c1)) ft4
+	ON ft2.c2 = ft4.c1
+	WHERE ft2.c1 > 900
+	ORDER BY ft2.c1 LIMIT 10;
+
+-- Several anti-joins per upper level join
+EXPLAIN (verbose, costs off)
+SELECT ft2.*, ft4.* FROM ft2 INNER JOIN
+	(SELECT * FROM ft4 WHERE
+	NOT EXISTS (SELECT 1 FROM ft1 WHERE ft1.c1 = ft4.c1)) ft4
+	ON ft2.c2 = ft4.c1
+	INNER JOIN (SELECT * FROM ft2 WHERE
+	NOT EXISTS (SELECT 1 FROM ft1 WHERE ft1.c1 = ft2.c1)) ft2b
+	ON ft2.c2 <= ft2b.c2
+	WHERE ft2.c1 > 900
+	ORDER BY ft2.c1 LIMIT 10;
+SELECT ft2.*, ft4.* FROM ft2 INNER JOIN
+	(SELECT * FROM ft4 WHERE
+	NOT EXISTS (SELECT 1 FROM ft1 WHERE ft1.c1 = ft4.c1)) ft4
+	ON ft2.c2 = ft4.c1
+	INNER JOIN (SELECT * FROM ft2 WHERE
+	NOT EXISTS (SELECT 1 FROM ft1 WHERE ft1.c1 = ft2.c1)) ft2b
+	ON ft2.c2 <= ft2b.c2
+	WHERE ft2.c1 > 900
+	ORDER BY ft2.c1 LIMIT 10;
+
+-- Anti-join below Anti-join
+EXPLAIN (verbose, costs off)
+SELECT ft2.* FROM ft2 WHERE
+	c1 = ANY (
+	SELECT c1 FROM ft2 WHERE
+		NOT EXISTS (SELECT 1 FROM ft4 WHERE ft4.c2 = ft2.c2))
+	AND ft2.c1 > 900
+	ORDER BY ft2.c1 LIMIT 10;
+SELECT ft2.* FROM ft2 WHERE
+	c1 = ANY (
+	SELECT c1 FROM ft2 WHERE
+		NOT EXISTS (SELECT 1 FROM ft4 WHERE ft4.c2 = ft2.c2))
+	AND ft2.c1 > 900
+	ORDER BY ft2.c1 LIMIT 10;
+
+-- Upper level relations shouldn't refer NOT EXISTS() subqueries
+EXPLAIN (verbose, costs off)
+SELECT * FROM ft2 ftupper WHERE
+	NOT EXISTS (
+	SELECT 1 FROM ft2 WHERE
+		NOT EXISTS (SELECT 1 FROM ft4 WHERE ft4.c2 = ft2.c2) AND c1 = ftupper.c1 )
+	AND ftupper.c1 > 900
+	ORDER BY ftupper.c1 LIMIT 10;
+SELECT * FROM ft2 ftupper WHERE
+	NOT EXISTS (
+	SELECT 1 FROM ft2 WHERE
+		NOT EXISTS (SELECT 1 FROM ft4 WHERE ft4.c2 = ft2.c2) AND c1 = ftupper.c1 )
+	AND ftupper.c1 > 900
+	ORDER BY ftupper.c1 LIMIT 10;
+
+-- NOT EXISTS should be propagated to the highest upper inner join
+EXPLAIN (verbose, costs off)
+	SELECT ft2.*, ft4.* FROM ft2 INNER JOIN
+	(SELECT * FROM ft4 WHERE NOT EXISTS (
+		SELECT 1 FROM ft1 WHERE ft1.c2 = ft4.c2)) ft4
+	ON ft2.c2 = ft4.c1
+	INNER JOIN
+	(SELECT * FROM ft2 WHERE NOT EXISTS (
+		SELECT 1 FROM ft1 WHERE ft1.c1 = ft2.c1)) ft21
+	ON ft2.c2 = ft21.c2
+	WHERE ft2.c1 > 900
+	ORDER BY ft2.c1 LIMIT 10;
+SELECT ft2.*, ft4.* FROM ft2 INNER JOIN
+	(SELECT * FROM ft4 WHERE NOT EXISTS (
+		SELECT 1 FROM ft1 WHERE ft1.c2 = ft4.c2)) ft4
+	ON ft2.c2 = ft4.c1
+	INNER JOIN
+	(SELECT * FROM ft2 WHERE NOT EXISTS (
+		SELECT 1 FROM ft1 WHERE ft1.c1 = ft2.c1)) ft21
+	ON ft2.c2 = ft21.c2
+	WHERE ft2.c1 > 900
+	ORDER BY ft2.c1 LIMIT 10;
+
+-- Anti-join conditions shouldn't pop up as left/right join clauses.
+SET enable_material TO off;
+EXPLAIN (verbose, costs off)
+SELECT x1.c1 FROM
+		(SELECT * FROM ft2 WHERE NOT EXISTS (SELECT 1 FROM ft1 WHERE ft1.c1 = ft2.c1 AND ft2.c2 < 10)) x1
+	RIGHT JOIN
+		(SELECT * FROM ft2 WHERE NOT EXISTS (SELECT 1 FROM ft1 WHERE ft1.c1 = ft2.c1 AND ft2.c2 < 10)) x2
+	ON (x1.c1 = x2.c1)
+ORDER BY x1.c1 LIMIT 10;
+SELECT x1.c1 FROM
+		(SELECT * FROM ft2 WHERE NOT EXISTS (SELECT 1 FROM ft1 WHERE ft1.c1 = ft2.c1 AND ft2.c2 < 10)) x1
+	RIGHT JOIN
+		(SELECT * FROM ft2 WHERE NOT EXISTS (SELECT 1 FROM ft1 WHERE ft1.c1 = ft2.c1 AND ft2.c2 < 10)) x2
+	ON (x1.c1 = x2.c1)
+ORDER BY x1.c1 LIMIT 10;
+RESET enable_material;
+
+-- Can't push down anti-join with inner rel vars in targetlist
+EXPLAIN (verbose, costs off)
+SELECT ft1.c1 FROM ft1 JOIN ft2 on ft1.c1 = ft2.c1 WHERE
+	NOT EXISTS (
+		SELECT ft2.c1 FROM ft2 JOIN ft4 ON ft2.c1 = ft4.c1
+		WHERE ft2.c1 = ft1.c1)
+	ORDER BY ft1.c1 LIMIT 5;
+SELECT ft1.c1 FROM ft1 JOIN ft2 on ft1.c1 = ft2.c1 WHERE
+	NOT EXISTS (
+		SELECT ft2.c1 FROM ft2 JOIN ft4 ON ft2.c1 = ft4.c1
+		WHERE ft2.c1 = ft1.c1)
+	ORDER BY ft1.c1 LIMIT 5;
+
+-- Anti-join arising from LEFT JOIN .. IS NULL, should be pushed down
+EXPLAIN (verbose, costs off)
+SELECT ft2.* FROM ft2 LEFT JOIN ft4 ON ft2.c1 = ft4.c1
+WHERE ft2.c1 > 900 AND ft4.c1 IS NULL
+ORDER BY ft2.c1 LIMIT 10;
+SELECT ft2.* FROM ft2 LEFT JOIN ft4 ON ft2.c1 = ft4.c1
+WHERE ft2.c1 > 900 AND ft4.c1 IS NULL
+ORDER BY ft2.c1 LIMIT 10;
+
+-- Anti-join combined with another join target and additional remote quals
+EXPLAIN (verbose, costs off)
+SELECT ft2.*, ft1.* FROM ft2 INNER JOIN ft1 ON ft2.c1 = ft1.c1
+	WHERE ft2.c1 > 900
+	AND ft1.c2 < 20
+	AND NOT EXISTS (SELECT 1 FROM ft4 WHERE ft4.c1 = ft2.c1)
+	ORDER BY ft2.c1, ft1.c1 LIMIT 10;
+SELECT ft2.*, ft1.* FROM ft2 INNER JOIN ft1 ON ft2.c1 = ft1.c1
+	WHERE ft2.c1 > 900
+	AND ft1.c2 < 20
+	AND NOT EXISTS (SELECT 1 FROM ft4 WHERE ft4.c1 = ft2.c1)
+	ORDER BY ft2.c1, ft1.c1 LIMIT 10;
+
+-- Nested anti-joins: ensure lower-level NOT EXISTS propagate correctly
+EXPLAIN (verbose, costs off)
+SELECT ft2.* FROM ft2
+	WHERE ft2.c1 > 900
+	AND NOT EXISTS (
+		SELECT 1 FROM ft4
+		WHERE ft4.c1 = ft2.c1
+		AND NOT EXISTS (SELECT 1 FROM ft1 WHERE ft1.c1 = ft4.c1))
+	ORDER BY ft2.c1 LIMIT 10;
+SELECT ft2.* FROM ft2
+	WHERE ft2.c1 > 900
+	AND NOT EXISTS (
+		SELECT 1 FROM ft4
+		WHERE ft4.c1 = ft2.c1
+		AND NOT EXISTS (SELECT 1 FROM ft1 WHERE ft1.c1 = ft4.c1))
+	ORDER BY ft2.c1 LIMIT 10;
+
+-- ===================================================================
 -- test writable foreign table stuff
 -- ===================================================================
 EXPLAIN (verbose, costs off)

@@ -1655,8 +1655,8 @@ appendWhereClause(List *exprs, List *additional_conds, deparse_expr_cxt *context
 	}
 
 	/*
-	 * If there are some EXISTS conditions, coming from SEMI-JOINS, append
-	 * them.
+	 * If there are some EXISTS conditions, coming from SEMI/ANTI-JOINS,
+	 * append them.
 	 */
 	foreach(lc, additional_conds)
 	{
@@ -1687,6 +1687,9 @@ get_jointype_name(JoinType jointype)
 
 		case JOIN_SEMI:
 			return "SEMI";
+
+		case JOIN_ANTI:
+			return "ANTI";
 
 		default:
 			/* Shouldn't come here, but protect from buggy code. */
@@ -1786,7 +1789,7 @@ deparseSubqueryTargetList(deparse_expr_cxt *context)
  * the top-level WHERE clause, which is returned to *ignore_conds.
  *
  * 'additional_conds' is a pointer to a list of strings to be appended to
- * the WHERE clause, coming from lower-level SEMI-JOINs.
+ * the WHERE clause, coming from lower-level SEMI/ANTI-JOINs.
  */
 static void
 deparseFromExprForRel(StringInfo buf, PlannerInfo *root, RelOptInfo *foreignrel,
@@ -1871,6 +1874,9 @@ deparseFromExprForRel(StringInfo buf, PlannerInfo *root, RelOptInfo *foreignrel,
 		/* Deparse inner relation if not the target relation. */
 		if (!innerrel_is_target)
 		{
+			const bool	is_semi = fpinfo->jointype == JOIN_SEMI;
+			const bool	is_anti = fpinfo->jointype == JOIN_ANTI;
+
 			initStringInfo(&join_sql_i);
 			deparseRangeTblRef(&join_sql_i, root, innerrel,
 							   fpinfo->make_innerrel_subquery,
@@ -1878,22 +1884,23 @@ deparseFromExprForRel(StringInfo buf, PlannerInfo *root, RelOptInfo *foreignrel,
 							   params_list);
 
 			/*
-			 * SEMI-JOIN is deparsed as the EXISTS subquery. It references
-			 * outer and inner relations, so it should be evaluated as the
-			 * condition in the upper-level WHERE clause. We deparse the
-			 * condition and pass it to upper level callers as an
-			 * additional_conds list. Upper level callers are responsible for
-			 * inserting conditions from the list where appropriate.
+			 * SEMI/ANTI-JOIN is deparsed as an EXISTS-style subquery. It
+			 * references outer and inner relations, so it should be evaluated as
+			 * the condition in the upper-level WHERE clause. We deparse the
+			 * condition and pass it to upper level callers as an additional_conds
+			 * list. Upper level callers are responsible for inserting conditions
+			 * from the list where appropriate.
 			 */
-			if (fpinfo->jointype == JOIN_SEMI)
+			if (is_semi || is_anti)
 			{
 				deparse_expr_cxt context;
 				StringInfoData str;
+				const char *exists_keyword = is_anti ? "NOT EXISTS" : "EXISTS";
 
-				/* Construct deparsed condition from this SEMI-JOIN */
+				/* Construct deparsed condition from this SEMI/ANTI-JOIN */
 				initStringInfo(&str);
-				appendStringInfo(&str, "EXISTS (SELECT NULL FROM %s",
-								 join_sql_i.data);
+				appendStringInfo(&str, "%s (SELECT NULL FROM %s",
+							 exists_keyword, join_sql_i.data);
 
 				context.buf = &str;
 				context.foreignrel = foreignrel;
@@ -1902,8 +1909,8 @@ deparseFromExprForRel(StringInfo buf, PlannerInfo *root, RelOptInfo *foreignrel,
 				context.params_list = params_list;
 
 				/*
-				 * Append SEMI-JOIN clauses and EXISTS conditions from lower
-				 * levels to the current EXISTS subquery
+				 * Append SEMI/ANTI-JOIN clauses and EXISTS conditions from lower
+				 * levels to the current EXISTS-style subquery
 				 */
 				appendWhereClause(fpinfo->joinclauses, additional_conds_i, &context);
 
@@ -1917,7 +1924,7 @@ deparseFromExprForRel(StringInfo buf, PlannerInfo *root, RelOptInfo *foreignrel,
 					additional_conds_i = NIL;
 				}
 
-				/* Close parentheses for EXISTS subquery */
+				/* Close parentheses for EXISTS-style subquery */
 				appendStringInfoChar(&str, ')');
 
 				*additional_conds = lappend(*additional_conds, str.data);
@@ -1946,11 +1953,11 @@ deparseFromExprForRel(StringInfo buf, PlannerInfo *root, RelOptInfo *foreignrel,
 		Assert(!outerrel_is_target && !innerrel_is_target);
 
 		/*
-		 * For semijoin FROM clause is deparsed as an outer relation. An inner
-		 * relation and join clauses are converted to EXISTS condition and
-		 * passed to the upper level.
+		 * For semi/anti join FROM clause is deparsed as an outer relation. An
+		 * inner relation and join clauses are converted to EXISTS-style
+		 * condition and passed to the upper level.
 		 */
-		if (fpinfo->jointype == JOIN_SEMI)
+		if (fpinfo->jointype == JOIN_SEMI || fpinfo->jointype == JOIN_ANTI)
 		{
 			appendBinaryStringInfo(buf, join_sql_o.data, join_sql_o.len);
 		}
@@ -2032,7 +2039,7 @@ deparseFromExprForRel(StringInfo buf, PlannerInfo *root, RelOptInfo *foreignrel,
 
 /*
  * Append FROM clause entry for the given relation into buf.
- * Conditions from lower-level SEMI-JOINs are appended to additional_conds
+ * Conditions from lower-level SEMI/ANTI-JOINs are appended to additional_conds
  * and should be added to upper level WHERE clause.
  */
 static void

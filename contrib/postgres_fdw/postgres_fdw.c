@@ -5707,19 +5707,19 @@ foreign_join_ok(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	List	   *joinclauses;
 
 	/*
-	 * We support pushing down INNER, LEFT, RIGHT, FULL OUTER and SEMI joins.
-	 * Constructing queries representing ANTI joins is hard, hence not
-	 * considered right now.
+	 * We support pushing down INNER, LEFT, RIGHT, FULL OUTER, SEMI and ANTI
+	 * joins.
 	 */
 	if (jointype != JOIN_INNER && jointype != JOIN_LEFT &&
 		jointype != JOIN_RIGHT && jointype != JOIN_FULL &&
-		jointype != JOIN_SEMI)
+		jointype != JOIN_SEMI && jointype != JOIN_ANTI)
 		return false;
 
 	/*
-	 * We can't push down semi-join if its reltarget is not safe
+	 * We can't push down semi/anti-join if its reltarget is not safe
 	 */
-	if ((jointype == JOIN_SEMI) && !semijoin_target_ok(root, joinrel, outerrel, innerrel))
+	if ((jointype == JOIN_SEMI || jointype == JOIN_ANTI) &&
+		!semijoin_target_ok(root, joinrel, outerrel, innerrel))
 		return false;
 
 	/*
@@ -5846,11 +5846,11 @@ foreign_join_ok(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	 * the joinclauses, since they need to be evaluated while constructing the
 	 * join.
 	 *
-	 * For SEMI-JOIN clauses from inner relation can not be added to
+	 * For SEMI/ANTI-JOIN clauses from inner relation can not be added to
 	 * remote_conds, but should be treated as join clauses (as they are
-	 * deparsed to EXISTS subquery, where inner relation can be referred). A
-	 * list of relation ids, which can't be referred to from higher levels, is
-	 * preserved as a hidden_subquery_rels list.
+	 * deparsed to EXISTS-style subquery, where inner relation can be
+	 * referred). A list of relation ids, which can't be referred to from
+	 * higher levels, is preserved as a hidden_subquery_rels list.
 	 *
 	 * For a FULL OUTER JOIN, the other clauses from either relation can not
 	 * be added to the joinclauses or remote_conds, since each relation acts
@@ -5871,7 +5871,7 @@ foreign_join_ok(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 		case JOIN_LEFT:
 
 			/*
-			 * When semi-join is involved in the inner or outer part of the
+			 * When semi/anti-join is involved in the inner or outer part of the
 			 * left join, it's deparsed as a subquery, and we can't refer to
 			 * its vars on the upper level.
 			 */
@@ -5886,7 +5886,7 @@ foreign_join_ok(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 		case JOIN_RIGHT:
 
 			/*
-			 * When semi-join is involved in the inner or outer part of the
+			 * When semi/anti-join is involved in the inner or outer part of the
 			 * right join, it's deparsed as a subquery, and we can't refer to
 			 * its vars on the upper level.
 			 */
@@ -5899,13 +5899,14 @@ foreign_join_ok(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 			break;
 
 		case JOIN_SEMI:
+		case JOIN_ANTI:
 			fpinfo->joinclauses = list_concat(fpinfo->joinclauses,
-											  fpinfo_i->remote_conds);
+									  fpinfo_i->remote_conds);
 			fpinfo->joinclauses = list_concat(fpinfo->joinclauses,
-											  fpinfo->remote_conds);
+									  fpinfo->remote_conds);
 			fpinfo->remote_conds = list_copy(fpinfo_o->remote_conds);
 			fpinfo->hidden_subquery_rels = bms_union(fpinfo->hidden_subquery_rels,
-													 innerrel->relids);
+										 innerrel->relids);
 			break;
 
 		case JOIN_FULL:
