@@ -720,6 +720,19 @@ SELECT * FROM ft1, ft4, ft5, local_tbl WHERE ft1.c1 = ft4.c1 AND ft1.c1 = ft5.c1
 RESET enable_nestloop;
 RESET enable_hashjoin;
 
+-- push down joins whose inputs are themselves subqueries over foreign tables
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT s.c1, s.c2, t.c2
+FROM (SELECT c1, c2 FROM ft1 WHERE c1 < 20 ORDER BY c1 LIMIT 10) s
+JOIN (SELECT c1, c2 FROM ft2 WHERE c1 < 30 ORDER BY c1 LIMIT 20) t
+    ON (s.c1 = t.c1)
+ORDER BY 1;
+SELECT s.c1, s.c2, t.c2
+FROM (SELECT c1, c2 FROM ft1 WHERE c1 < 20 ORDER BY c1 LIMIT 10) s
+JOIN (SELECT c1, c2 FROM ft2 WHERE c1 < 30 ORDER BY c1 LIMIT 20) t
+    ON (s.c1 = t.c1)
+ORDER BY 1;
+
 -- test that add_paths_with_pathkeys_for_rel() arranges for the epq_path to
 -- return columns needed by the parent ForeignScan node
 EXPLAIN (VERBOSE, COSTS OFF)

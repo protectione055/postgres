@@ -24,6 +24,9 @@
 #include "utils/memutils.h"
 #include "utils/varlena.h"
 
+extern void pgfdw_initialize_hooks(void);
+extern void pgfdw_cleanup_hooks(void);
+
 /*
  * Describes the valid options for objects that this wrapper uses.
  */
@@ -587,4 +590,12 @@ _PG_init(void)
 							   NULL);
 
 	MarkGUCPrefixReserved("postgres_fdw");
+
+	pgfdw_initialize_hooks();
+}
+
+void
+_PG_fini(void)
+{
+	pgfdw_cleanup_hooks();
 }
