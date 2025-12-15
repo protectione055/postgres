@@ -455,15 +455,15 @@ static void fetch_more_data(ForeignScanState *node);
 static void close_cursor(PGconn *conn, unsigned int cursor_number,
 						 PgFdwConnState *conn_state);
 static PgFdwModifyState *create_foreign_modify(EState *estate,
-											   RangeTblEntry *rte,
-											   ResultRelInfo *resultRelInfo,
-											   CmdType operation,
-											   Plan *subplan,
-											   char *query,
-											   List *target_attrs,
-											   int values_end,
-											   bool has_returning,
-											   List *retrieved_attrs);
+													RangeTblEntry *rte,
+													ResultRelInfo *resultRelInfo,
+													CmdType operation,
+													Plan *subplan,
+													char *query,
+													List *target_attrs,
+													int values_end,
+													bool has_returning,
+													List *retrieved_attrs);
 static TupleTableSlot **execute_foreign_modify(EState *estate,
 											   ResultRelInfo *resultRelInfo,
 											   CmdType operation,
@@ -545,6 +545,32 @@ static void merge_fdw_options(PgFdwRelationInfo *fpinfo,
 							  const PgFdwRelationInfo *fpinfo_o,
 							  const PgFdwRelationInfo *fpinfo_i);
 static int	get_batch_size_option(Relation rel);
+
+void pgfdw_initialize_hooks(void);
+void pgfdw_cleanup_hooks(void);
+static void pgfdw_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
+									   Index rti, RangeTblEntry *rte);
+static bool pgfdw_assign_subquery_fpinfo(RelOptInfo *rel,
+										  SubqueryScanPath *sqpath);
+static PgFdwRelationInfo *pgfdw_copy_fpinfo_for_subquery(RelOptInfo *rel,
+														 PgFdwRelationInfo *sub_fpinfo);
+static ForeignPath *pgfdw_find_underlying_foreign_path(Path *path);
+static bool pgfdw_try_assign_subquery_fpinfo_list(RelOptInfo *rel, List *paths);
+
+static set_rel_pathlist_hook_type prev_set_rel_pathlist_hook = NULL;
+
+void
+pgfdw_initialize_hooks(void)
+{
+	prev_set_rel_pathlist_hook = set_rel_pathlist_hook;
+	set_rel_pathlist_hook = pgfdw_set_rel_pathlist;
+}
+
+void
+pgfdw_cleanup_hooks(void)
+{
+	set_rel_pathlist_hook = prev_set_rel_pathlist_hook;
+}
 
 
 /*
@@ -1502,11 +1528,12 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	EState	   *estate = node->ss.ps.state;
 	PgFdwScanState *fsstate;
 	RangeTblEntry *rte;
-	Oid			userid;
-	ForeignTable *table;
+	Oid		userid;
+	ForeignTable *table = NULL;
 	UserMapping *user;
-	int			rtindex;
-	int			numParams;
+	Oid		serverid = InvalidOid;
+	int		rtindex;
+	int		numParams;
 
 	/*
 	 * Do nothing in EXPLAIN (no ANALYZE) case.  node->fdw_state stays NULL.
@@ -1526,14 +1553,43 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	 */
 	userid = OidIsValid(fsplan->checkAsUser) ? fsplan->checkAsUser : GetUserId();
 	if (fsplan->scan.scanrelid > 0)
+	{
 		rtindex = fsplan->scan.scanrelid;
+		rte = exec_rt_fetch(rtindex, estate);
+		Assert(rte->rtekind == RTE_RELATION);
+		table = GetForeignTable(rte->relid);
+		serverid = table->serverid;
+	}
 	else
-		rtindex = bms_next_member(fsplan->fs_base_relids, -1);
-	rte = exec_rt_fetch(rtindex, estate);
+	{
+		int		bms_index = -1;
 
-	/* Get info about foreign table. */
-	table = GetForeignTable(rte->relid);
-	user = GetUserMapping(userid, table->serverid);
+		serverid = fsplan->fs_server;
+
+		if (!OidIsValid(serverid))
+		{
+			while ((bms_index = bms_next_member(fsplan->fs_base_relids,
+										 bms_index)) >= 0)
+			{
+				RangeTblEntry *baserte;
+
+				baserte = exec_rt_fetch(bms_index, estate);
+				if (baserte->rtekind != RTE_RELATION)
+					continue;
+
+				table = GetForeignTable(baserte->relid);
+				break;
+			}
+
+			/* Get the user mapping for the foreign server. */
+			if (table != NULL)
+				serverid = table->serverid;
+		}
+	}
+
+	if (!OidIsValid(serverid))
+		elog(ERROR, "foreign server OID is not set for foreign scan");
+	user = GetUserMapping(userid, serverid);
 
 	/*
 	 * Get connection to the foreign server.  Connection manager will
@@ -2889,27 +2945,46 @@ postgresExplainForeignScan(ForeignScanState *node, ExplainState *es)
 				rti += rtoffset;
 				Assert(bms_is_member(rti, plan->fs_base_relids));
 				rte = rt_fetch(rti, es->rtable);
-				Assert(rte->rtekind == RTE_RELATION);
 				/* This logic should agree with explain.c's ExplainTargetRel */
-				relname = get_rel_name(rte->relid);
-				if (es->verbose)
+				if (rte->rtekind == RTE_RELATION)
 				{
-					char	   *namespace;
+					relname = get_rel_name(rte->relid);
+					if (es->verbose)
+					{
+						char   *nspname;
 
-					namespace = get_namespace_name_or_temp(get_rel_namespace(rte->relid));
-					appendStringInfo(relations, "%s.%s",
-									 quote_identifier(namespace),
-									 quote_identifier(relname));
+						nspname = get_namespace_name_or_temp(get_rel_namespace(rte->relid));
+						appendStringInfo(relations, "%s.%s",
+								 quote_identifier(nspname),
+								 quote_identifier(relname));
+					}
+					else
+						appendStringInfoString(relations,
+									   quote_identifier(relname));
 				}
-				else
-					appendStringInfoString(relations,
-										   quote_identifier(relname));
 				refname = (char *) list_nth(es->rtable_names, rti - 1);
 				if (refname == NULL)
 					refname = rte->eref->aliasname;
-				if (strcmp(refname, relname) != 0)
-					appendStringInfo(relations, " %s",
-									 quote_identifier(refname));
+				if (rte->rtekind == RTE_RELATION)
+				{
+					if (strcmp(refname, relname) != 0)
+						appendStringInfo(relations, " %s",
+								 quote_identifier(refname));
+				}
+				else if (rte->rtekind == RTE_SUBQUERY)
+				{
+					if (es->verbose)
+						appendStringInfoString(relations, "SUBQUERY");
+					if (es->verbose)
+						appendStringInfo(relations, " %s",
+								 quote_identifier(refname));
+					else
+						appendStringInfoString(relations,
+									   quote_identifier(refname));
+				}
+				else
+					appendStringInfoString(relations,
+									   quote_identifier(refname));
 			}
 			else
 				appendStringInfoChar(relations, *ptr++);
@@ -6134,6 +6209,172 @@ add_paths_with_pathkeys_for_rel(PlannerInfo *root, RelOptInfo *rel,
 	}
 }
 
+static PgFdwRelationInfo *
+pgfdw_copy_fpinfo_for_subquery(RelOptInfo *rel, PgFdwRelationInfo *sub_fpinfo)
+{
+	PgFdwRelationInfo *fpinfo;
+
+	fpinfo = (PgFdwRelationInfo *) palloc(sizeof(PgFdwRelationInfo));
+	memcpy(fpinfo, sub_fpinfo, sizeof(PgFdwRelationInfo));
+
+	if (sub_fpinfo->attrs_used)
+		fpinfo->attrs_used = bms_copy(sub_fpinfo->attrs_used);
+	if (sub_fpinfo->lower_subquery_rels)
+		fpinfo->lower_subquery_rels = bms_copy(sub_fpinfo->lower_subquery_rels);
+	if (sub_fpinfo->hidden_subquery_rels)
+		fpinfo->hidden_subquery_rels = bms_copy(sub_fpinfo->hidden_subquery_rels);
+
+	/* Mark this relation as a subquery so deparse can recognize its columns. */
+	fpinfo->lower_subquery_rels =
+		bms_add_member(fpinfo->lower_subquery_rels, rel->relid);
+
+	/*
+	 * Always tag the subquery copy with the parent's own rtindex so EXPLAIN
+	 * consistently shows the identifiers visible at this planning level.
+	 */
+	fpinfo->relation_name = psprintf("%u", rel->relid);
+
+	/* Assign a stable relation index for alias generation. */
+	fpinfo->relation_index = rel->relid;
+
+	/* Reset subquery tracking fields; caller will fill them in as needed. */
+	fpinfo->underlying_foreignrel = NULL;
+	fpinfo->underlying_pathtarget = NULL;
+	fpinfo->underlying_pathkeys = NIL;
+	fpinfo->underlying_has_final_sort = false;
+	fpinfo->underlying_has_limit = false;
+
+	/* This RelOptInfo now represents a standalone subquery input. */
+	fpinfo->remote_conds = NIL;
+	fpinfo->local_conds = NIL;
+	fpinfo->final_remote_exprs = NIL;
+	fpinfo->outerrel = NULL;
+	fpinfo->innerrel = NULL;
+	fpinfo->jointype = JOIN_INNER;
+	fpinfo->joinclauses = NIL;
+	fpinfo->make_outerrel_subquery = false;
+	fpinfo->make_innerrel_subquery = false;
+
+	return fpinfo;
+}
+
+static bool
+pgfdw_assign_subquery_fpinfo(RelOptInfo *rel, SubqueryScanPath *sqpath)
+{
+	Path   *subpath = sqpath->subpath;
+	ForeignPath *fpath;
+	RelOptInfo *subrel;
+	PgFdwRelationInfo *sub_fpinfo;
+	PgFdwRelationInfo *fpinfo;
+
+	fpath = pgfdw_find_underlying_foreign_path(subpath);
+	if (fpath == NULL)
+		return false;
+	subrel = fpath->path.parent;
+
+	if (subrel == NULL || subrel->fdw_private == NULL ||
+		subrel->fdwroutine == NULL)
+		return false;
+
+	if (subrel->fdwroutine->GetForeignRelSize != postgresGetForeignRelSize)
+		return false;
+
+	sub_fpinfo = (PgFdwRelationInfo *) subrel->fdw_private;
+	if (!sub_fpinfo->pushdown_safe)
+		return false;
+
+	fpinfo = pgfdw_copy_fpinfo_for_subquery(rel, sub_fpinfo);
+	fpinfo->underlying_foreignrel = subrel;
+	fpinfo->underlying_pathtarget = copy_pathtarget(fpath->path.pathtarget);
+	fpinfo->underlying_pathkeys = list_copy(fpath->path.pathkeys);
+	fpinfo->underlying_has_final_sort = false;
+	fpinfo->underlying_has_limit = false;
+
+	if (fpath->fdw_private &&
+		list_length(fpath->fdw_private) > FdwPathPrivateHasLimit)
+	{
+		/* Items match enum FdwPathPrivateIndex. */
+		fpinfo->underlying_has_final_sort =
+			boolVal(list_nth(fpath->fdw_private, FdwPathPrivateHasFinalSort));
+		fpinfo->underlying_has_limit =
+			boolVal(list_nth(fpath->fdw_private, FdwPathPrivateHasLimit));
+	}
+
+	rel->fdw_private = fpinfo;
+	rel->serverid = subrel->serverid;
+	rel->userid = subrel->userid;
+	rel->useridiscurrent = subrel->useridiscurrent;
+	rel->fdwroutine = subrel->fdwroutine;
+
+	return true;
+}
+
+static void
+pgfdw_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
+						  Index rti, RangeTblEntry *rte)
+{
+	if (prev_set_rel_pathlist_hook)
+		prev_set_rel_pathlist_hook(root, rel, rti, rte);
+
+	if (rel->fdw_private || rte->rtekind != RTE_SUBQUERY)
+		return;
+
+	if (pgfdw_try_assign_subquery_fpinfo_list(rel, rel->pathlist) ||
+		pgfdw_try_assign_subquery_fpinfo_list(rel, rel->partial_pathlist))
+		return;
+}
+
+static bool
+pgfdw_try_assign_subquery_fpinfo_list(RelOptInfo *rel, List *paths)
+{
+	ListCell   *lc;
+
+	foreach(lc, paths)
+	{
+		Path   *path = (Path *) lfirst(lc);
+
+		if (!IsA(path, SubqueryScanPath))
+			continue;
+
+		if (pgfdw_assign_subquery_fpinfo(rel, (SubqueryScanPath *) path))
+			return true;
+	}
+
+	return false;
+}
+
+static ForeignPath *
+pgfdw_find_underlying_foreign_path(Path *path)
+{
+	for (;;)
+	{
+		if (path == NULL)
+			return NULL;
+		if (IsA(path, ForeignPath))
+			return (ForeignPath *) path;
+		else if (IsA(path, ProjectionPath))
+			path = ((ProjectionPath *) path)->subpath;
+		else if (IsA(path, SortPath))
+			path = ((SortPath *) path)->subpath;
+		else if (IsA(path, IncrementalSortPath))
+			path = ((IncrementalSortPath *) path)->spath.subpath;
+		else if (IsA(path, LimitPath))
+			path = ((LimitPath *) path)->subpath;
+		else if (IsA(path, UniquePath))
+			path = ((UniquePath *) path)->subpath;
+		else if (IsA(path, MaterialPath))
+			path = ((MaterialPath *) path)->subpath;
+		else if (IsA(path, MemoizePath))
+			path = ((MemoizePath *) path)->subpath;
+		else if (IsA(path, GatherPath))
+			path = ((GatherPath *) path)->subpath;
+		else if (IsA(path, GatherMergePath))
+			path = ((GatherMergePath *) path)->subpath;
+		else
+			return NULL;
+	}
+}
+
 /*
  * Parse options from foreign server and apply them to fpinfo.
  *
@@ -6289,6 +6530,16 @@ postgresGetForeignJoinPaths(PlannerInfo *root,
 	 */
 	if (!bms_is_empty(joinrel->lateral_relids))
 		return;
+
+	/*
+	 * Likewise, don't try to push down joins that contain grouped (partially
+	 * aggregated) inputs.  Such rels carry Aggrefs in their reltarget, and we
+	 * currently can't represent that in a remote join targetlist.
+	 */
+	if (IS_GROUPED_REL(outerrel) || IS_GROUPED_REL(innerrel))
+	{
+		return;
+	}
 
 	/*
 	 * Create unfinished PgFdwRelationInfo entry which is used to indicate

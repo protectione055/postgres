@@ -123,6 +123,16 @@ typedef struct PgFdwRelationInfo
 										 * from upper relations, used
 										 * internally for equivalence member
 										 * search */
+	/*
+	 * If this relation originates from a pushed-down subquery, remember the
+	 * underlying foreign rel and its target so we can map Vars back to remote
+	 * column positions during deparse (see get_relation_column_alias_ids).
+	 */
+	RelOptInfo *underlying_foreignrel;
+	PathTarget *underlying_pathtarget;
+	List	   *underlying_pathkeys;
+	bool		underlying_has_final_sort;
+	bool		underlying_has_limit;
 
 	/*
 	 * Index of the relation.  It is used to create an alias to a subquery

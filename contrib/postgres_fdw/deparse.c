@@ -51,6 +51,7 @@
 #include "nodes/nodeFuncs.h"
 #include "nodes/plannodes.h"
 #include "optimizer/optimizer.h"
+#include "optimizer/pathnode.h"
 #include "optimizer/prep.h"
 #include "optimizer/tlist.h"
 #include "parser/parsetree.h"
@@ -206,6 +207,7 @@ static bool is_subquery_var(Var *node, RelOptInfo *foreignrel,
 							int *relno, int *colno);
 static void get_relation_column_alias_ids(Var *node, RelOptInfo *foreignrel,
 										  int *relno, int *colno);
+static List *get_subquery_tlist(PlannerInfo *subroot);
 
 
 /*
@@ -1239,6 +1241,21 @@ build_tlist_to_deparse(RelOptInfo *foreignrel)
 }
 
 /*
+ * Return the targetlist that represents the visible output columns of a
+ * pushed-down subquery.  Prefer the planner's processed_tlist if available so
+ * we retain ressortgroupref and resjunk bookkeeping needed for ORDER/GROUP BY
+ * clauses; fall back to the original parse targetlist otherwise.
+ */
+static List *
+get_subquery_tlist(PlannerInfo *subroot)
+{
+	if (subroot->processed_tlist)
+		return subroot->processed_tlist;
+
+	return subroot->parse->targetList;
+}
+
+/*
  * Deparse SELECT statement for given relation into buf.
  *
  * tlist contains the list of desired columns to be fetched from foreign server.
@@ -1374,6 +1391,22 @@ deparseSelectSql(List *tlist, bool is_subquery, List **retrieved_attrs,
 		 * columns required to be fetched from the foreign server.
 		 */
 		deparseExplicitTargetList(tlist, false, retrieved_attrs, context);
+	}
+	else if (fpinfo->underlying_foreignrel != NULL)
+	{
+		/*
+		 * This relation represents a pushed-down subquery.  Use the supplied
+		 * targetlist when available so we emit the exact columns the plan needs;
+		 * otherwise fall back to the reltarget expressions.
+		 */
+		if (tlist != NIL)
+			deparseExplicitTargetList(tlist, false, retrieved_attrs, context);
+		else
+		{
+			if (retrieved_attrs)
+				*retrieved_attrs = NIL;
+			deparseSubqueryTargetList(context);
+		}
 	}
 	else
 	{
@@ -2008,13 +2041,68 @@ deparseFromExprForRel(StringInfo buf, PlannerInfo *root, RelOptInfo *foreignrel,
 	}
 	else
 	{
-		RangeTblEntry *rte = planner_rt_fetch(foreignrel->relid, root);
+		RangeTblEntry *rte;
+		Relation	rel;
+
+		if (fpinfo->underlying_foreignrel != NULL)
+		{
+			List	   *retrieved_attrs = NIL;
+			RelOptInfo *subrel = fpinfo->underlying_foreignrel;
+			PlannerInfo *subroot = foreignrel->subroot;
+			List	   *sub_tlist;
+			PgFdwRelationInfo *sub_fpinfo;
+			List	   *sub_remote_conds;
+			int			ncols;
+			int			i;
+
+			sub_fpinfo = (PgFdwRelationInfo *) subrel->fdw_private;
+			sub_remote_conds = sub_fpinfo ? sub_fpinfo->remote_conds : NIL;
+			Assert(subroot != NULL);
+
+			/* Build the underlying SELECT that represents the pushed-down subquery. */
+			if (fpinfo->underlying_pathtarget)
+				sub_tlist = make_tlist_from_pathtarget(fpinfo->underlying_pathtarget);
+			else
+				sub_tlist = get_subquery_tlist(subroot);
+			appendStringInfoChar(buf, '(');
+			deparseSelectStmtForRel(buf, subroot, subrel, sub_tlist,
+								 sub_remote_conds,
+								 fpinfo->underlying_pathkeys,
+								 fpinfo->underlying_has_final_sort,
+								 fpinfo->underlying_has_limit,
+								 false,
+								 &retrieved_attrs, params_list);
+			appendStringInfoChar(buf, ')');
+			if (retrieved_attrs != NIL)
+				list_free(retrieved_attrs);
+
+			/* Assign the alias expected by Vars referencing this subquery. */
+			appendStringInfo(buf, " %s%d", SUBQUERY_REL_ALIAS_PREFIX,
+						 fpinfo->relation_index);
+
+			ncols = list_length(sub_tlist);
+			if (ncols > 0)
+			{
+				appendStringInfoChar(buf, '(');
+				for (i = 1; i <= ncols; i++)
+				{
+					if (i > 1)
+						appendStringInfoString(buf, ", ");
+
+					appendStringInfo(buf, "%s%d", SUBQUERY_COL_ALIAS_PREFIX, i);
+				}
+				appendStringInfoChar(buf, ')');
+			}
+			return;
+		}
+
+		rte = planner_rt_fetch(foreignrel->relid, root);
 
 		/*
 		 * Core code already has some lock on each rel being planned, so we
 		 * can use NoLock here.
 		 */
-		Relation	rel = table_open(rte->relid, NoLock);
+		rel = table_open(rte->relid, NoLock);
 
 		deparseRelation(buf, rel);
 
@@ -4171,11 +4259,21 @@ is_subquery_var(Var *node, RelOptInfo *foreignrel, int *relno, int *colno)
 	Assert(IS_SIMPLE_REL(foreignrel) || IS_JOIN_REL(foreignrel));
 
 	/*
-	 * If the given relation isn't a join relation, it doesn't have any lower
-	 * subqueries, so the Var isn't a subquery output column.
+	 * If the relation itself is a pushed-down subquery, map the Var using the
+	 * aliases generated for that subquery.
 	 */
 	if (!IS_JOIN_REL(foreignrel))
+	{
+		if (fpinfo->underlying_foreignrel &&
+			bms_is_member(node->varno, foreignrel->relids))
+		{
+			get_relation_column_alias_ids(node, foreignrel, relno, colno);
+			return true;
+		}
+
+		/* Otherwise there are no lower subqueries to inspect. */
 		return false;
+	}
 
 	/*
 	 * If the Var doesn't belong to any lower subqueries, it isn't a subquery
@@ -4227,32 +4325,106 @@ get_relation_column_alias_ids(Var *node, RelOptInfo *foreignrel,
 							  int *relno, int *colno)
 {
 	PgFdwRelationInfo *fpinfo = (PgFdwRelationInfo *) foreignrel->fdw_private;
-	int			i;
+	List	   *alias_exprs;
 	ListCell   *lc;
+	int			i;
+	int			max_cols;
 
 	/* Get the relation alias ID */
 	*relno = fpinfo->relation_index;
 
-	/* Get the column alias ID */
-	i = 1;
-	foreach(lc, foreignrel->reltarget->exprs)
+	/*
+	 * Vars referencing this relation's alias map directly by attribute number,
+	 * regardless of how the reltarget happens to be ordered.
+	 */
+	if (node->varlevelsup == 0 &&
+		node->varattno > 0 &&
+		node->varno == fpinfo->relation_index)
 	{
-		Var		   *tlvar = (Var *) lfirst(lc);
+		*colno = node->varattno;
+		return;
+	}
 
-		/*
-		 * Match reltarget entries only on varno/varattno.  Ideally there
-		 * would be some cross-check on varnullingrels, but it's unclear what
-		 * to do exactly; we don't have enough context to know what that value
-		 * should be.
-		 */
-		if (IsA(tlvar, Var) &&
-			tlvar->varno == node->varno &&
-			tlvar->varattno == node->varattno)
+	alias_exprs = foreignrel->reltarget->exprs;
+
+	/* Get the column alias ID based on the select-list order */
+	i = 1;
+	foreach(lc, alias_exprs)
+	{
+		Expr   *expr = (Expr *) lfirst(lc);
+
+		if (IsA(expr, Var))
+		{
+			Var *tlvar = (Var *) expr;
+
+			if (equal(tlvar, node) ||
+				(tlvar->varno == node->varno &&
+				 tlvar->varattno == node->varattno))
+			{
+				*colno = i;
+				return;
+			}
+		}
+		else if (equal(expr, node))
 		{
 			*colno = i;
 			return;
 		}
 		i++;
+	}
+
+	max_cols = list_length(alias_exprs);
+
+	/* Fall back to the underlying pathtarget, if available. */
+	if (fpinfo && fpinfo->underlying_pathtarget &&
+		fpinfo->underlying_pathtarget->exprs)
+	{
+		ListCell   *lc2;
+		List       *underlying_exprs = fpinfo->underlying_pathtarget->exprs;
+
+		if (underlying_exprs != alias_exprs)
+		{
+			i = 1;
+			foreach(lc2, underlying_exprs)
+			{
+				Expr   *expr = (Expr *) lfirst(lc2);
+
+				if (IsA(expr, Var))
+				{
+					Var *tlvar = (Var *) expr;
+
+					if (equal(tlvar, node) ||
+						(tlvar->varno == node->varno &&
+						 tlvar->varattno == node->varattno))
+					{
+						*colno = i;
+						return;
+					}
+				}
+				else if (equal(expr, node))
+				{
+					*colno = i;
+					return;
+				}
+				i++;
+			}
+		}
+
+		max_cols = Max(max_cols, list_length(underlying_exprs));
+	}
+	else
+		max_cols = Max(max_cols, list_length(foreignrel->reltarget->exprs));
+
+	/*
+	 * If we couldn't find a matching Var, fall back to using the Var's
+	 * attribute number as the column position.  This happens for subqueries
+	 * whose outputs are expressions (for example aggregates), where the
+	 * reltarget entries are not simple Vars.
+	 */
+	if (node->varattno > 0 && node->varattno <= max_cols)
+	{
+		*colno = node->varattno;
+		return;
 	}
 
 	/* Shouldn't get here */
