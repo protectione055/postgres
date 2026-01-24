@@ -576,6 +576,11 @@ _outRangeTblEntry(StringInfo str, const RangeTblEntry *node)
 			break;
 	}
 
+		WRITE_STRING_FIELD(dblinkname);
+		WRITE_STRING_FIELD(dblinknamespace);
+		WRITE_STRING_FIELD(dblinkrelname);
+		WRITE_UINT64_FIELD(dblink_signature);
+
 	WRITE_BOOL_FIELD(lateral);
 	WRITE_BOOL_FIELD(inFromCl);
 	WRITE_NODE_FIELD(securityQuals);

@@ -25,6 +25,8 @@
 #include "executor/executor.h"
 #include "executor/nodeForeignscan.h"
 #include "foreign/fdwapi.h"
+#include "foreign/foreign.h"
+#include "access/tupdesc.h"
 #include "utils/rel.h"
 
 static TupleTableSlot *ForeignNext(ForeignScanState *node);
@@ -198,9 +200,50 @@ ExecInitForeignScan(ForeignScan *node, EState *estate, int eflags)
 	else
 	{
 		TupleDesc	scan_tupdesc;
+		RangeTblEntry *rte = exec_rt_fetch(scanrelid, estate);
 
 		/* don't trust FDWs to return tuples fulfilling NOT NULL constraints */
-		scan_tupdesc = CreateTupleDescCopy(RelationGetDescr(currentRelation));
+		if (rte && rte->dblinkname)
+		{
+			int			colcount = list_length(rte->eref->colnames);
+			bool		use_rte_desc = (colcount > 0 &&
+									colcount == list_length(rte->coltypes) &&
+									colcount == list_length(rte->coltypmods) &&
+									colcount == list_length(rte->colcollations) &&
+									!list_member_oid(rte->coltypes, InvalidOid));
+
+			if (use_rte_desc)
+				scan_tupdesc = BuildDescFromLists(rte->eref->colnames,
+												rte->coltypes,
+												rte->coltypmods,
+												rte->colcollations);
+			else
+			{
+				Oid		serverid;
+				FdwRoutine *fdwroutine_lookup;
+				uint64	schema_signature = 0;
+
+				serverid = GetForeignServerIdByRelId(RelationGetRelid(currentRelation));
+				fdwroutine_lookup = GetFdwRoutineByServerId(serverid);
+				if (fdwroutine_lookup->GetDblinkTableMetadata == NULL)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("FDW does not support database link metadata")));
+
+				scan_tupdesc = fdwroutine_lookup->GetDblinkTableMetadata(serverid,
+														GetUserId(),
+														rte->dblinknamespace,
+														rte->dblinkrelname,
+														&schema_signature);
+				if (scan_tupdesc == NULL)
+					ereport(ERROR,
+							(errcode(ERRCODE_UNDEFINED_TABLE),
+							 errmsg("could not fetch remote metadata for database link \"%s\"",
+									rte->dblinkname)));
+			}
+		}
+		else
+			scan_tupdesc = CreateTupleDescCopy(RelationGetDescr(currentRelation));
 		ExecInitScanTupleSlot(estate, &scanstate->ss, scan_tupdesc,
 							  &TTSOpsHeapTuple);
 		/* Node's targetlist will contain Vars with varno = scanrelid */

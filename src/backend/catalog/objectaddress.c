@@ -33,6 +33,7 @@
 #include "catalog/pg_conversion.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_default_acl.h"
+#include "catalog/pg_dblink.h"
 #include "catalog/pg_event_trigger.h"
 #include "catalog/pg_extension.h"
 #include "catalog/pg_foreign_data_wrapper.h"
@@ -3723,6 +3724,28 @@ getObjectDescription(const ObjectAddress *object, bool missing_ok)
 				break;
 			}
 
+		case DbLinkRelationId:
+			{
+				HeapTuple	tup;
+				Form_pg_dblink dblform;
+
+				tup = SearchSysCache1(DBLINKOID,
+								  ObjectIdGetDatum(object->objectId));
+				if (!HeapTupleIsValid(tup))
+				{
+					if (!missing_ok)
+						elog(ERROR, "cache lookup failed for database link %u",
+							 object->objectId);
+					break;
+				}
+
+				dblform = (Form_pg_dblink) GETSTRUCT(tup);
+				appendStringInfo(&buffer, _("database link %s"),
+									 NameStr(dblform->dblname));
+				ReleaseSysCache(tup);
+				break;
+			}
+
 		case UserMappingRelationId:
 			{
 				HeapTuple	tup;
@@ -4623,6 +4646,10 @@ getObjectTypeDescription(const ObjectAddress *object, bool missing_ok)
 
 		case ForeignServerRelationId:
 			appendStringInfoString(&buffer, "server");
+			break;
+
+		case DbLinkRelationId:
+			appendStringInfoString(&buffer, "database link");
 			break;
 
 		case UserMappingRelationId:
@@ -5660,6 +5687,30 @@ getObjectIdentityParts(const ObjectAddress *object,
 					if (objname)
 						*objname = list_make1(pstrdup(srv->servername));
 				}
+				break;
+			}
+
+		case DbLinkRelationId:
+			{
+				HeapTuple	tup;
+				Form_pg_dblink dblform;
+
+				tup = SearchSysCache1(DBLINKOID,
+								  ObjectIdGetDatum(object->objectId));
+				if (!HeapTupleIsValid(tup))
+				{
+					if (!missing_ok)
+						elog(ERROR, "cache lookup failed for database link %u",
+							 object->objectId);
+					break;
+				}
+
+				dblform = (Form_pg_dblink) GETSTRUCT(tup);
+				appendStringInfoString(&buffer,
+								 quote_identifier(NameStr(dblform->dblname)));
+				if (objname)
+					*objname = list_make1(pstrdup(NameStr(dblform->dblname)));
+				ReleaseSysCache(tup);
 				break;
 			}
 

@@ -1299,6 +1299,11 @@ typedef struct RangeTblEntry
 	/*
 	 * Fields valid in all RTEs:
 	 */
+	/* database link info for @dblink relations (NULL otherwise) */
+	char	   *dblinkname;
+	char	   *dblinknamespace;
+	char	   *dblinkrelname;
+	uint64		dblink_signature;
 	/* was LATERAL specified? */
 	bool		lateral pg_node_attr(query_jumble_ignore);
 	/* present in FROM clause? */
@@ -3062,6 +3067,28 @@ typedef struct DropUserMappingStmt
 	char	   *servername;		/* server name */
 	bool		missing_ok;		/* ignore missing mappings */
 } DropUserMappingStmt;
+
+/* ----------------------
+ *		Create/Drop DATABASE LINK Statements
+ * ----------------------
+ */
+
+typedef struct CreateDatabaseLinkStmt
+{
+	NodeTag		type;
+	char	   *dblinkname; 		/* database link name */
+	bool		if_not_exists;	/* just do nothing if it already exists? */
+	RoleSpec   *username;		/* CONNECT TO role, or CURRENT_USER */
+	char	   *password;		/* IDENTIFIED BY password, if provided */
+	char	   *connstr;		/* USING connection string */
+} CreateDatabaseLinkStmt;
+
+typedef struct DropDatabaseLinkStmt
+{
+	NodeTag		type;
+	char	   *dblinkname;		/* database link name */
+	bool		missing_ok;		/* ignore missing link */
+} DropDatabaseLinkStmt;
 
 /* ----------------------
  *		Import Foreign Schema Statement

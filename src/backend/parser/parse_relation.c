@@ -19,9 +19,13 @@
 #include "access/htup_details.h"
 #include "access/relation.h"
 #include "access/table.h"
+#include "catalog/pg_dblink.h"
 #include "catalog/heap.h"
 #include "catalog/namespace.h"
+#include "foreign/foreign.h"
+#include "foreign/fdwapi.h"
 #include "funcapi.h"
+#include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "parser/parse_enr.h"
@@ -1492,6 +1496,10 @@ addRangeTableEntry(ParseState *pstate,
 	LOCKMODE	lockmode;
 	Relation	rel;
 	ParseNamespaceItem *nsitem;
+	Oid		dblink_serverid = InvalidOid;
+	Oid		dblink_relid = InvalidOid;
+	TupleDesc	dblink_tupdesc = NULL;
+	uint64		dblink_signature = 0;
 
 	Assert(pstate != NULL);
 
@@ -1507,22 +1515,141 @@ addRangeTableEntry(ParseState *pstate,
 	lockmode = isLockedRefname(pstate, refname) ? RowShareLock : AccessShareLock;
 
 	/*
+	 * @dblink references are parsed into RangeVar.catalogname.
+	 * Minimal support: require an existing foreign table whose server matches
+	 * the database link's server.
+	 */
+	if (relation->catalogname != NULL)
+	{
+		HeapTuple	tup;
+		Datum		datum;
+		Datum		reldatum;
+		bool		isnull;
+		FdwRoutine *fdw;
+
+		tup = SearchSysCache1(DBLINKNAME,
+							  CStringGetDatum(relation->catalogname));
+		if (!HeapTupleIsValid(tup))
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("database link \"%s\" does not exist",
+							relation->catalogname),
+					 parser_errposition(pstate, relation->location)));
+
+		datum = SysCacheGetAttrNotNull(DBLINKNAME, tup,
+								  Anum_pg_dblink_dblserver);
+		dblink_serverid = DatumGetObjectId(datum);
+
+		reldatum = SysCacheGetAttrNotNull(DBLINKNAME, tup,
+								  Anum_pg_dblink_dblrelid);
+		dblink_relid = DatumGetObjectId(reldatum);
+
+		/* confirm link is valid */
+		isnull = false;
+		(void) isnull;
+
+		fdw = GetFdwRoutineByServerId(dblink_serverid);
+		if (fdw->GetDblinkTableMetadata != NULL)
+		{
+			dblink_tupdesc = fdw->GetDblinkTableMetadata(dblink_serverid,
+											 GetUserId(),
+											 relation->schemaname,
+											 relation->relname,
+											 &dblink_signature);
+			(void) dblink_signature;
+		}
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("FDW does not support database link metadata"),
+					 errdetail("The FDW for database link \"%s\" lacks metadata hook support.",
+							 relation->catalogname),
+					 parser_errposition(pstate, relation->location)));
+
+		ReleaseSysCache(tup);
+	}
+
+	/*
 	 * Get the rel's OID.  This access also ensures that we have an up-to-date
 	 * relcache entry for the rel.  Since this is typically the first access
 	 * to a rel in a statement, we must open the rel with the proper lockmode.
 	 */
-	rel = parserOpenTable(pstate, relation, lockmode);
+	if (OidIsValid(dblink_serverid))
+	{
+		if (!OidIsValid(dblink_relid))
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("database link \"%s\" has no anchor relation",
+						relation->catalogname),
+					 parser_errposition(pstate, relation->location)));
+
+		rel = table_open(dblink_relid, lockmode);
+	}
+	else
+		rel = parserOpenTable(pstate, relation, lockmode);
 	rte->relid = RelationGetRelid(rel);
 	rte->inh = inh;
 	rte->relkind = rel->rd_rel->relkind;
 	rte->rellockmode = lockmode;
+
+	if (OidIsValid(dblink_serverid))
+	{
+		ForeignTable *ft;
+			char		*srvname;
+
+		if (rte->relkind != RELKIND_FOREIGN_TABLE)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("relation \"%s\" is not a foreign table",
+							relation->relname),
+					 parser_errposition(pstate, relation->location)));
+
+		ft = GetForeignTable(rte->relid);
+		if (ft->serverid != dblink_serverid)
+		{
+			srvname = GetForeignServer(ft->serverid)->servername;
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("foreign table \"%s\" belongs to server \"%s\", not database link \"%s\"",
+							relation->relname, srvname, relation->catalogname),
+					 parser_errposition(pstate, relation->location)));
+		}
+
+	}
 
 	/*
 	 * Build the list of effective column names using user-supplied aliases
 	 * and/or actual column names.
 	 */
 	rte->eref = makeAlias(refname, NIL);
-	buildRelationAliases(rel->rd_att, alias, rte->eref);
+	buildRelationAliases(dblink_tupdesc != NULL ? dblink_tupdesc : rel->rd_att,
+						 alias, rte->eref);
+
+	if (OidIsValid(dblink_serverid))
+	{
+		List		*coltypes = NIL;
+		List		*coltypmods = NIL;
+		List		*colcollations = NIL;
+		int			attno;
+
+		rte->dblinkname = pstrdup(relation->catalogname);
+		rte->dblinknamespace = relation->schemaname ? pstrdup(relation->schemaname) : NULL;
+		rte->dblinkrelname = pstrdup(relation->relname);
+		rte->dblink_signature = dblink_signature;
+
+		for (attno = 1; attno <= dblink_tupdesc->natts; attno++)
+		{
+			Form_pg_attribute att = TupleDescAttr(dblink_tupdesc, attno - 1);
+
+			coltypes = lappend_oid(coltypes, att->atttypid);
+			coltypmods = lappend_int(coltypmods, att->atttypmod);
+			colcollations = lappend_oid(colcollations, att->attcollation);
+		}
+
+		rte->coltypes = coltypes;
+		rte->coltypmods = coltypmods;
+		rte->colcollations = colcollations;
+	}
 
 	/*
 	 * Set flags and initialize access permissions.
@@ -1548,7 +1675,8 @@ addRangeTableEntry(ParseState *pstate,
 	 * list --- caller must do that if appropriate.
 	 */
 	nsitem = buildNSItemFromTupleDesc(rte, list_length(pstate->p_rtable),
-									  perminfo, rel->rd_att);
+								  perminfo,
+								  dblink_tupdesc != NULL ? dblink_tupdesc : rel->rd_att);
 
 	/*
 	 * Drop the rel refcount, but keep the access lock till end of transaction
@@ -3370,7 +3498,13 @@ get_rte_attribute_name(RangeTblEntry *rte, AttrNumber attnum)
 	 * built (which can easily happen for rules).
 	 */
 	if (rte->rtekind == RTE_RELATION)
+	{
+		if (rte->dblinkname &&
+			attnum > 0 && attnum <= list_length(rte->eref->colnames))
+			return strVal(list_nth(rte->eref->colnames, attnum - 1));
+
 		return get_attname(rte->relid, attnum, false);
+	}
 
 	/*
 	 * Otherwise use the column name from eref.  There should always be one.
@@ -3397,21 +3531,30 @@ get_rte_attribute_is_dropped(RangeTblEntry *rte, AttrNumber attnum)
 	{
 		case RTE_RELATION:
 			{
-				/*
-				 * Plain relation RTE --- get the attribute's catalog entry
-				 */
-				HeapTuple	tp;
-				Form_pg_attribute att_tup;
+				if (rte->dblinkname)
+				{
+					if (attnum <= 0 || attnum > list_length(rte->coltypes))
+						elog(ERROR, "invalid varattno %d", attnum);
+					result = !OidIsValid(list_nth_oid(rte->coltypes, attnum - 1));
+				}
+				else
+				{
+					/*
+					 * Plain relation RTE --- get the attribute's catalog entry
+					 */
+					HeapTuple	tp;
+					Form_pg_attribute att_tup;
 
-				tp = SearchSysCache2(ATTNUM,
-									 ObjectIdGetDatum(rte->relid),
-									 Int16GetDatum(attnum));
-				if (!HeapTupleIsValid(tp))	/* shouldn't happen */
-					elog(ERROR, "cache lookup failed for attribute %d of relation %u",
-						 attnum, rte->relid);
-				att_tup = (Form_pg_attribute) GETSTRUCT(tp);
-				result = att_tup->attisdropped;
-				ReleaseSysCache(tp);
+					tp = SearchSysCache2(ATTNUM,
+								 ObjectIdGetDatum(rte->relid),
+								 Int16GetDatum(attnum));
+					if (!HeapTupleIsValid(tp))	/* shouldn't happen */
+						elog(ERROR, "cache lookup failed for attribute %d of relation %u",
+							 attnum, rte->relid);
+					att_tup = (Form_pg_attribute) GETSTRUCT(tp);
+					result = att_tup->attisdropped;
+					ReleaseSysCache(tp);
+				}
 			}
 			break;
 		case RTE_SUBQUERY:

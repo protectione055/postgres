@@ -242,6 +242,14 @@
 #define pg_attribute_printf(f,a)
 #endif
 
+/*
+ * Use pg_restrict in function prototypes for restrict-qualified pointers.
+ * This is a macro so it can degrade gracefully on compilers without restrict.
+ */
+#ifndef pg_restrict
+#define pg_restrict restrict
+#endif
+
 /* GCC supports aligned and packed */
 #if defined(__GNUC__)
 #define pg_attribute_aligned(a) __attribute__((aligned(a)))
