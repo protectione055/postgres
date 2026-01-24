@@ -1,0 +1,108 @@
+--
+-- Test dblink metadata cache TTL
+--
+-- Setup
+CREATE EXTENSION IF NOT EXISTS postgres_fdw;
+-- Create a table that mimics a remote table
+CREATE SCHEMA dblink_cache;
+CREATE TABLE dblink_cache.test_remote_table (id int, data text);
+INSERT INTO dblink_cache.test_remote_table VALUES (1, 'initial');
+-- Helper to create link with dynamic dbname
+DO $d$
+BEGIN
+    EXECUTE format(
+        'CREATE DATABASE LINK mylink_ttl CONNECT TO CURRENT_USER USING %L',
+        'dbname=' || current_database() || ' port=' || current_setting('port') || ' fdw=postgres_fdw meta_ttl=60'
+    );
+END;
+$d$;
+-- 1. Test Cache Hit (Regression)
+-- Access to load cache
+SELECT * FROM dblink_cache.test_remote_table@mylink_ttl ORDER BY id;
+ id |  data   
+----+---------
+  1 | initial
+(1 row)
+
+-- Modify remote table: this would break query if cache is used (because * expands using old schema, but remote requires new schema or errors)
+-- Wait, if we use *, postgres_fdw constructs query "SELECT id, data FROM ...".
+-- If we rename 'data', that query fails on remote.
+ALTER TABLE dblink_cache.test_remote_table RENAME COLUMN data TO data_renamed;
+-- Access again. Should FAIL with "column data does not exist" from remote.
+-- This proves we used the cached definition (which has 'data').
+-- If we refreshed, we would expand * to 'id, data_renamed' and it would succeed.
+SELECT * FROM dblink_cache.test_remote_table@mylink_ttl ORDER BY id;
+ERROR:  column "data" does not exist
+CONTEXT:  remote SQL command: SELECT id, data FROM dblink_cache.test_remote_table ORDER BY id ASC NULLS LAST
+-- 2. Test Expiry (Behavior)
+-- Create link with short TTL
+DO $d$
+BEGIN
+    EXECUTE format(
+        'CREATE DATABASE LINK mylink_short CONNECT TO CURRENT_USER USING %L',
+        'dbname=' || current_database() || ' port=' || current_setting('port') || ' fdw=postgres_fdw meta_ttl=1'
+    );
+END;
+$d$;
+-- Access (loads cache with 'id', 'data_renamed')
+SELECT * FROM dblink_cache.test_remote_table@mylink_short ORDER BY id;
+ id | data_renamed 
+----+--------------
+  1 | initial
+(1 row)
+
+-- Rename again
+ALTER TABLE dblink_cache.test_remote_table RENAME COLUMN data_renamed TO data_v2;
+-- Access immediately (within 1s): Should fail (cache hit)
+SELECT * FROM dblink_cache.test_remote_table@mylink_short ORDER BY id;
+ERROR:  column "data_renamed" does not exist
+CONTEXT:  remote SQL command: SELECT id, data_renamed FROM dblink_cache.test_remote_table ORDER BY id ASC NULLS LAST
+-- Sleep to expire cache
+SELECT pg_sleep(1.5);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- Access again: Should succeed (cache miss -> refresh -> sees 'data_v2')
+SELECT * FROM dblink_cache.test_remote_table@mylink_short ORDER BY id;
+ id | data_v2 
+----+---------
+  1 | initial
+(1 row)
+
+-- 3. Test Invalid TTL (Error)
+DO $d$
+BEGIN
+    BEGIN
+        EXECUTE format('CREATE DATABASE LINK link_bad_1 USING %L', 'meta_ttl=-1');
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE 'Caught expected error: %', SQLERRM;
+    END;
+END;
+$d$;
+DO $d$
+BEGIN
+    BEGIN
+        EXECUTE format('CREATE DATABASE LINK link_bad_2 USING %L', 'meta_ttl=abc');
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE 'Caught expected error: %', SQLERRM;
+    END;
+END;
+$d$;
+NOTICE:  Caught expected error: invalid meta_ttl value in connection string
+DO $d$
+BEGIN
+    BEGIN
+        EXECUTE format('CREATE DATABASE LINK link_bad_3 USING %L', 'meta_ttl=2147483648');
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE 'Caught expected error: %', SQLERRM;
+    END;
+END;
+$d$;
+NOTICE:  Caught expected error: invalid meta_ttl value in connection string
+-- Cleanup
+DROP DATABASE LINK mylink_ttl;
+DROP DATABASE LINK mylink_short;
+DROP TABLE dblink_cache.test_remote_table;
+DROP SCHEMA dblink_cache;

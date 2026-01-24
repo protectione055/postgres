@@ -32,6 +32,7 @@
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_statistic_ext_data.h"
 #include "foreign/fdwapi.h"
+#include "foreign/foreign.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -178,14 +179,9 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 		Oid			userid;
 
 		serverid = GetForeignServerIdByRelId(relationObjectId);
-		fdw = GetFdwRoutineByServerId(serverid);
-		if (fdw->GetDblinkTableMetadata == NULL)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("FDW does not support database link metadata")));
 
 		userid = GetUserId();
-		remote_tupdesc = fdw->GetDblinkTableMetadata(serverid,
+		remote_tupdesc = GetCachedDblinkTableMetadata(serverid,
 											 userid,
 											 rte->dblinknamespace,
 											 rte->dblinkrelname,

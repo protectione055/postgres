@@ -1525,7 +1525,6 @@ addRangeTableEntry(ParseState *pstate,
 		Datum		datum;
 		Datum		reldatum;
 		bool		isnull;
-		FdwRoutine *fdw;
 
 		tup = SearchSysCache1(DBLINKNAME,
 							  CStringGetDatum(relation->catalogname));
@@ -1548,23 +1547,19 @@ addRangeTableEntry(ParseState *pstate,
 		isnull = false;
 		(void) isnull;
 
-		fdw = GetFdwRoutineByServerId(dblink_serverid);
-		if (fdw->GetDblinkTableMetadata != NULL)
-		{
-			dblink_tupdesc = fdw->GetDblinkTableMetadata(dblink_serverid,
-											 GetUserId(),
-											 relation->schemaname,
-											 relation->relname,
-											 &dblink_signature);
-			(void) dblink_signature;
-		}
-		else
+		dblink_tupdesc = GetCachedDblinkTableMetadata(dblink_serverid,
+										 GetUserId(),
+										 relation->schemaname,
+										 relation->relname,
+										 &dblink_signature);
+		if (dblink_tupdesc == NULL)
 			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("FDW does not support database link metadata"),
-					 errdetail("The FDW for database link \"%s\" lacks metadata hook support.",
-							 relation->catalogname),
+					(errcode(ERRCODE_UNDEFINED_TABLE),
+					 errmsg("could not fetch remote metadata for database link \"%s\"",
+							relation->catalogname),
 					 parser_errposition(pstate, relation->location)));
+
+		(void) dblink_signature;
 
 		ReleaseSysCache(tup);
 	}

@@ -221,17 +221,11 @@ ExecInitForeignScan(ForeignScan *node, EState *estate, int eflags)
 			else
 			{
 				Oid		serverid;
-				FdwRoutine *fdwroutine_lookup;
 				uint64	schema_signature = 0;
 
 				serverid = GetForeignServerIdByRelId(RelationGetRelid(currentRelation));
-				fdwroutine_lookup = GetFdwRoutineByServerId(serverid);
-				if (fdwroutine_lookup->GetDblinkTableMetadata == NULL)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("FDW does not support database link metadata")));
 
-				scan_tupdesc = fdwroutine_lookup->GetDblinkTableMetadata(serverid,
+				scan_tupdesc = GetCachedDblinkTableMetadata(serverid,
 														GetUserId(),
 														rte->dblinknamespace,
 														rte->dblinkrelname,

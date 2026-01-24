@@ -189,7 +189,8 @@ connstr_to_server_options(const char *connstr)
 static void
 dblink_extract_connstr_params(const char *connstr,
 					 char **clean_connstr,
-					 char **fdwname)
+					 char **fdwname,
+					 int *meta_ttl)
 {
 	char		*work;
 	char		*p;
@@ -197,6 +198,7 @@ dblink_extract_connstr_params(const char *connstr,
 
 	*clean_connstr = NULL;
 	*fdwname = NULL;
+	*meta_ttl = -1;
 
 	if (connstr == NULL)
 		return;
@@ -296,6 +298,29 @@ dblink_extract_connstr_params(const char *connstr,
 						 errmsg("multiple fdw values specified in connection string")));
 			if (*fdwname == NULL)
 				*fdwname = pstrdup(val);
+			continue;
+		}
+
+		/* dblink-reserved parameter: meta_ttl= */
+		if (pg_strcasecmp(key, "meta_ttl") == 0)
+		{
+			char *endptr;
+			long val_l;
+
+			errno = 0;
+			val_l = strtol(val, &endptr, 10);
+
+			if (val[0] == '\0' || *endptr != '\0' || errno == ERANGE || val_l < -1 || val_l > INT_MAX)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("invalid meta_ttl value in connection string")));
+
+			if (*meta_ttl != -1 && *meta_ttl != val_l)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("multiple meta_ttl values specified in connection string")));
+
+			*meta_ttl = (int) val_l;
 			continue;
 		}
 
@@ -1560,6 +1585,7 @@ CreateDatabaseLink(CreateDatabaseLinkStmt *stmt)
 	char		*anchor_relname;
 	Oid		anchor_relid = InvalidOid;
 	char		*clean_connstr = NULL;
+	int			meta_ttl = -1;
 
 	/* Check for duplicate database link name */
 	rel = table_open(DbLinkRelationId, RowExclusiveLock);
@@ -1606,7 +1632,7 @@ CreateDatabaseLink(CreateDatabaseLinkStmt *stmt)
 	 * Extract dblink-reserved parameters from connstr (e.g., fdw=) and build
 	 * foreign server options from the cleaned connection string.
 	 */
-	dblink_extract_connstr_params(stmt->connstr, &clean_connstr, &fdwname);
+	dblink_extract_connstr_params(stmt->connstr, &clean_connstr, &fdwname, &meta_ttl);
 	if (fdwname == NULL)
 		fdwname = pstrdup(default_fdwname);
 
@@ -1743,6 +1769,14 @@ CreateDatabaseLink(CreateDatabaseLinkStmt *stmt)
 	if (clean_connstr)
 		optlist = lappend(optlist,
 						makeDefElem("connstr", (Node *) makeString(pstrdup(clean_connstr)), -1));
+	if (meta_ttl >= 0)
+	{
+		char		buf[32];
+
+		snprintf(buf, sizeof(buf), "%d", meta_ttl);
+		optlist = lappend(optlist,
+						makeDefElem("meta_ttl", (Node *) makeString(pstrdup(buf)), -1));
+	}
 
 	options = transformGenericOptions(DbLinkRelationId,
 							 PointerGetDatum(NULL),
