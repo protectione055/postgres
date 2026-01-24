@@ -176,6 +176,165 @@ connstr_to_server_options(const char *connstr)
 	return options;
 }
 
+/*
+ * Extract reserved dblink-only parameters from a connection string.
+ *
+ * Currently supported:
+ *   fdw=<fdw_name>
+ *
+ * The returned *clean_connstr is a normalized key=value string with the
+ * reserved parameters removed. The returned *fdwname (if any) is the value
+ * of fdw=.
+ */
+static void
+dblink_extract_connstr_params(const char *connstr,
+					 char **clean_connstr,
+					 char **fdwname)
+{
+	char		*work;
+	char		*p;
+	StringInfoData buf;
+
+	*clean_connstr = NULL;
+	*fdwname = NULL;
+
+	if (connstr == NULL)
+		return;
+
+	work = pstrdup(connstr);
+	p = work;
+	initStringInfo(&buf);
+
+	while (*p)
+	{
+		char		*key_start;
+		char		*key_end;
+		char		*key;
+		char		*val;
+		bool		need_quote = false;
+		const char	*s;
+
+		while (isspace((unsigned char) *p))
+			p++;
+		if (*p == '\0')
+			break;
+
+		key_start = p;
+		while (*p && *p != '=' && !isspace((unsigned char) *p))
+			p++;
+		key_end = p;
+		while (isspace((unsigned char) *p))
+			p++;
+		if (*p != '=')
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("invalid connection string syntax")));
+		p++; /* skip '=' */
+
+		if (key_end == key_start)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("invalid connection string syntax")));
+
+		key = pnstrdup(key_start, key_end - key_start);
+
+		while (isspace((unsigned char) *p))
+			p++;
+
+		if (*p == '\'')
+		{
+			StringInfoData vbuf;
+
+			p++; /* skip opening quote */
+			initStringInfo(&vbuf);
+			while (*p)
+			{
+				if (*p == '\'')
+				{
+					if (*(p + 1) == '\'')
+					{
+						appendStringInfoChar(&vbuf, '\'');
+						p += 2;
+						continue;
+					}
+					p++; /* closing quote */
+					break;
+				}
+				if (*p == '\\' && *(p + 1) != '\0')
+				{
+					appendStringInfoChar(&vbuf, *(p + 1));
+					p += 2;
+					continue;
+				}
+				appendStringInfoChar(&vbuf, *p++);
+			}
+			if (*(p - 1) != '\'')
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("invalid connection string syntax")));
+			val = vbuf.data;
+		}
+		else
+		{
+			char	*val_start = p;
+
+			while (*p && !isspace((unsigned char) *p))
+				p++;
+			val = pnstrdup(val_start, p - val_start);
+		}
+
+		/* dblink-reserved parameter: fdw= */
+		if (pg_strcasecmp(key, "fdw") == 0)
+		{
+			if (val[0] == '\0')
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("invalid fdw value in connection string")));
+			if (*fdwname != NULL && pg_strcasecmp(*fdwname, val) != 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("multiple fdw values specified in connection string")));
+			if (*fdwname == NULL)
+				*fdwname = pstrdup(val);
+			continue;
+		}
+
+		if (buf.len > 0)
+			appendStringInfoChar(&buf, ' ');
+		appendStringInfo(&buf, "%s=", key);
+
+		if (val[0] == '\0')
+			need_quote = true;
+		for (s = val; *s; s++)
+		{
+			if (isspace((unsigned char) *s) || *s == '\'' || *s == '\\')
+			{
+				need_quote = true;
+				break;
+			}
+		}
+
+		if (!need_quote)
+			appendStringInfoString(&buf, val);
+		else
+		{
+			appendStringInfoChar(&buf, '\'');
+			for (s = val; *s; s++)
+			{
+				if (*s == '\'')
+					appendStringInfoString(&buf, "''");
+				else if (*s == '\\')
+					appendStringInfoString(&buf, "\\\\");
+				else
+					appendStringInfoChar(&buf, *s);
+			}
+			appendStringInfoChar(&buf, '\'');
+		}
+	}
+
+	*clean_connstr = buf.data;
+}
+
 
 typedef struct
 {
@@ -1394,11 +1553,13 @@ CreateDatabaseLink(CreateDatabaseLinkStmt *stmt)
 	List		*srvoptlist = NIL;
 	List		*umoptlist = NIL;
 	char		authmode = DBLINK_AUTH_CURRENT_USER;
-	const char *fdwname = "postgres_fdw";
+	const char *default_fdwname = "postgres_fdw";
+	char		*fdwname = NULL;
 	const char *remote_user = NULL;
 	const char *anchor_colname = "__dblink_anchor__";
 	char		*anchor_relname;
 	Oid		anchor_relid = InvalidOid;
+	char		*clean_connstr = NULL;
 
 	/* Check for duplicate database link name */
 	rel = table_open(DbLinkRelationId, RowExclusiveLock);
@@ -1441,8 +1602,36 @@ CreateDatabaseLink(CreateDatabaseLinkStmt *stmt)
 		remote_user = connect_role->rolename;
 	}
 
-	/* Build foreign server options from connection string, if provided */
-	srvoptlist = connstr_to_server_options(stmt->connstr);
+	/*
+	 * Extract dblink-reserved parameters from connstr (e.g., fdw=) and build
+	 * foreign server options from the cleaned connection string.
+	 */
+	dblink_extract_connstr_params(stmt->connstr, &clean_connstr, &fdwname);
+	if (fdwname == NULL)
+		fdwname = pstrdup(default_fdwname);
+
+	/* Validate the selected FDW and ensure it supports dblink metadata */
+	{
+		ForeignDataWrapper *fdw;
+		FdwRoutine *fdw_routine;
+		AclResult	aclresult;
+
+		fdw = GetForeignDataWrapperByName(fdwname, false);
+		aclresult = object_aclcheck(ForeignDataWrapperRelationId, fdw->fdwid,
+								ownerId, ACL_USAGE);
+		if (aclresult != ACLCHECK_OK)
+			aclcheck_error(aclresult, OBJECT_FDW, fdw->fdwname);
+
+		fdw_routine = GetFdwRoutine(fdw->fdwhandler);
+		if (fdw_routine->GetDblinkTableMetadata == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("FDW does not support database link metadata"),
+					 errdetail("The foreign-data wrapper \"%s\" lacks database link metadata hook support.",
+							   fdwname)));
+	}
+
+	srvoptlist = connstr_to_server_options(clean_connstr);
 
 	/* Create foreign server for this link */
 	srvstmt = makeNode(CreateForeignServerStmt);
@@ -1551,9 +1740,9 @@ CreateDatabaseLink(CreateDatabaseLinkStmt *stmt)
 	if (stmt->password)
 		optlist = lappend(optlist,
 						makeDefElem("password", (Node *) makeString(pstrdup(stmt->password)), -1));
-	if (stmt->connstr)
+	if (clean_connstr)
 		optlist = lappend(optlist,
-						makeDefElem("connstr", (Node *) makeString(pstrdup(stmt->connstr)), -1));
+						makeDefElem("connstr", (Node *) makeString(pstrdup(clean_connstr)), -1));
 
 	options = transformGenericOptions(DbLinkRelationId,
 							 PointerGetDatum(NULL),

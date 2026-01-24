@@ -144,6 +144,7 @@ typedef struct PgFdwScanState
 {
 	Relation	rel;			/* relcache entry for the foreign table. NULL
 								 * for a foreign join scan. */
+	bool		is_dblink;		/* true if this is an @dblink scan */
 	TupleDesc	tupdesc;		/* tuple descriptor of scan */
 	AttInMetadata *attinmeta;	/* attribute datatype conversion metadata */
 
@@ -1547,6 +1548,8 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	table = GetForeignTable(rte->relid);
 	user = GetUserMapping(userid, table->serverid);
 
+	fsstate->is_dblink = (rte && rte->dblinkname != NULL);
+
 	/*
 	 * Get connection to the foreign server.  Connection manager will
 	 * establish new connection if necessary.
@@ -1580,7 +1583,10 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	if (fsplan->scan.scanrelid > 0)
 	{
 		fsstate->rel = node->ss.ss_currentRelation;
-		fsstate->tupdesc = RelationGetDescr(fsstate->rel);
+		if (rte && rte->dblinkname)
+			fsstate->tupdesc = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+		else
+			fsstate->tupdesc = RelationGetDescr(fsstate->rel);
 	}
 	else
 	{
@@ -3866,7 +3872,7 @@ fetch_more_data(ForeignScanState *node)
 
 		fsstate->tuples[i] =
 			make_tuple_from_result_row(res, i,
-									   fsstate->rel,
+								   fsstate->is_dblink ? NULL : fsstate->rel,
 									   fsstate->attinmeta,
 									   fsstate->retrieved_attrs,
 									   node,

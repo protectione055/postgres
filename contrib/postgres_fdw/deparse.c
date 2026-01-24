@@ -1453,9 +1453,14 @@ deparseTargetList(StringInfo buf,
 
 	*retrieved_attrs = NIL;
 
-	/* If there's a whole-row reference, we'll need all the columns. */
-	have_wholerow = bms_is_member(0 - FirstLowInvalidHeapAttributeNumber,
-								  attrs_used);
+	/*
+	 * If there's a whole-row reference, we'll need all the columns.
+	 * For @dblink, always fetch all remote columns: the local anchor table's
+	 * physical columns don't match remote metadata, so relying on attrs_used
+	 * can omit needed remote columns.
+	 */
+	have_wholerow = rte->dblinkname ||
+		bms_is_member(0 - FirstLowInvalidHeapAttributeNumber, attrs_used);
 
 	first = true;
 	natts = rte->dblinkname ? list_length(rte->coltypes) : tupdesc->natts;
@@ -2810,7 +2815,10 @@ deparseColumnRef(StringInfo buf, int varno, int varattno, RangeTblEntry *rte,
 		 * If it's a column of a foreign table, and it has the column_name FDW
 		 * option, use that value.
 		 */
-		options = GetForeignColumnOptions(rte->relid, varattno);
+		if (rte->dblinkname)
+			options = NIL;
+		else
+			options = GetForeignColumnOptions(rte->relid, varattno);
 		foreach(lc, options)
 		{
 			DefElem    *def = (DefElem *) lfirst(lc);

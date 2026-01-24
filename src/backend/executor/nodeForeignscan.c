@@ -22,6 +22,7 @@
  */
 #include "postgres.h"
 
+#include "miscadmin.h"
 #include "executor/executor.h"
 #include "executor/nodeForeignscan.h"
 #include "foreign/fdwapi.h"

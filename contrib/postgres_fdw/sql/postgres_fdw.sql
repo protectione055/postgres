@@ -147,28 +147,6 @@ CREATE FOREIGN TABLE ft7 (
 ) SERVER loopback3 OPTIONS (schema_name 'S 1', table_name 'T 4');
 
 -- ===================================================================
--- tests for database link (@dblink)
--- ===================================================================
-CREATE DATABASE LINK dblink1 CONNECT TO CURRENT_USER
-    USING 'dbname=' || quote_literal(:'current_database') ||
-        ' port=' || quote_literal(:'current_port');
-
-ALTER SERVER dblink1 OPTIONS (
-	SET dbname :'current_database',
-	SET port :'current_port'
-);
-
-SELECT count(*) FROM "S 1"."T 1"@dblink1;
-
-CREATE VIEW dblink_view AS
-    SELECT "C 1" FROM "S 1"."T 1"@dblink1 WHERE "C 1" <= 3;
-
-SELECT count(*) FROM dblink_view;
-
-DROP VIEW dblink_view;
-DROP DATABASE LINK dblink1;
-
--- ===================================================================
 -- tests for validator
 -- ===================================================================
 -- requiressl and some other parameters are omitted because

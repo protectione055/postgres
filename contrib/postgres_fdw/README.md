@@ -17,11 +17,15 @@
 ```sql
 CREATE DATABASE LINK dblink1
   CONNECT TO CURRENT_USER
-  USING 'dbname=postgres port=15433';
+  USING 'dbname=postgres port=15433 fdw=postgres_fdw';
 ```
 
 `USING` 连接串会被解析为 server 选项（例如 `dbname`、`host`、`port`）。
 以下参数不会作为 server 选项写入：`user`、`password`、`client_encoding`、`fallback_application_name`。
+
+`USING` 连接串支持一个数据库链接保留参数：
+
+- `fdw=<fdwname>`：选择用于该链接的 FDW 驱动（默认 `postgres_fdw`）。该参数不会传递给底层 FDW 连接串解析。
 
 如果使用固定用户：
 
