@@ -9,8 +9,8 @@ SELECT current_database() AS current_database,
   current_setting('port') AS current_port
 \gset
 
-\set dblink_connstr 'dbname=' :current_database ' port=' :current_port
-\set dblink_connstr_fdw 'dbname=' :current_database ' port=' :current_port ' fdw=postgres_fdw'
+\set dblink_connstr 'dbname=' :current_database ' port=' :current_port ' meta_ttl=0'
+\set dblink_connstr_fdw 'dbname=' :current_database ' port=' :current_port ' fdw=postgres_fdw meta_ttl=0'
 
 CREATE EXTENSION postgres_fdw;
 
@@ -117,6 +117,25 @@ ALTER TABLE "dblink_s"."dblink_t_renamed" RENAME TO dblink_t;
 -- the view should work again after rename back
 SELECT count(*) FROM dblink_ddl_view;
 SELECT * FROM dblink_ddl_view ORDER BY c1;
+
+-- multi-table join over @dblink
+CREATE TABLE "dblink_s"."dblink_t2" (
+	c1 int NOT NULL,
+	c4 text,
+	CONSTRAINT dblink_t2_pkey PRIMARY KEY (c1)
+);
+INSERT INTO "dblink_s"."dblink_t2"
+	SELECT id, 'w' || to_char(id, 'FM0000') FROM generate_series(1, 10) id;
+ANALYZE "dblink_s"."dblink_t2";
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT count(*)
+	FROM "dblink_s"."dblink_t"@dblink_ddl t
+	JOIN "dblink_s"."dblink_t2"@dblink_ddl t2
+	ON t.c1 = t2.c1;
+SELECT count(*)
+	FROM "dblink_s"."dblink_t"@dblink_ddl t
+	JOIN "dblink_s"."dblink_t2"@dblink_ddl t2
+	ON t.c1 = t2.c1;
 
 DROP VIEW dblink_ddl_view;
 DROP DATABASE LINK dblink_ddl;
