@@ -15,8 +15,10 @@
 #include <limits.h>
 
 #include "access/htup_details.h"
+#include "access/tupdesc.h"
 #include "access/sysattr.h"
 #include "access/table.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_opfamily.h"
 #include "commands/defrem.h"
 #include "commands/explain_format.h"
@@ -37,12 +39,14 @@
 #include "optimizer/prep.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/tlist.h"
+#include "parser/parse_type.h"
 #include "parser/parsetree.h"
 #include "postgres_fdw.h"
 #include "storage/latch.h"
 #include "utils/builtins.h"
 #include "utils/float.h"
 #include "utils/guc.h"
+#include "common/hashfn.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -140,6 +144,7 @@ typedef struct PgFdwScanState
 {
 	Relation	rel;			/* relcache entry for the foreign table. NULL
 								 * for a foreign join scan. */
+	bool		is_dblink;		/* true if this is an @dblink scan */
 	TupleDesc	tupdesc;		/* tuple descriptor of scan */
 	AttInMetadata *attinmeta;	/* attribute datatype conversion metadata */
 
@@ -404,6 +409,11 @@ static bool postgresAnalyzeForeignTable(Relation relation,
 										BlockNumber *totalpages);
 static List *postgresImportForeignSchema(ImportForeignSchemaStmt *stmt,
 										 Oid serverOid);
+static TupleDesc postgresGetDblinkTableMetadata(Oid serverOid,
+											 Oid userid,
+											 const char *remote_schema,
+											 const char *remote_table,
+											 uint64 *schema_signature);
 static void postgresGetForeignJoinPaths(PlannerInfo *root,
 										RelOptInfo *joinrel,
 										RelOptInfo *outerrel,
@@ -598,6 +608,9 @@ postgres_fdw_handler(PG_FUNCTION_ARGS)
 
 	/* Support functions for IMPORT FOREIGN SCHEMA */
 	routine->ImportForeignSchema = postgresImportForeignSchema;
+
+	/* Support functions for @dblink remote metadata */
+	routine->GetDblinkTableMetadata = postgresGetDblinkTableMetadata;
 
 	/* Support functions for join push-down */
 	routine->GetForeignJoinPaths = postgresGetForeignJoinPaths;
@@ -1535,6 +1548,8 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	table = GetForeignTable(rte->relid);
 	user = GetUserMapping(userid, table->serverid);
 
+	fsstate->is_dblink = (rte && rte->dblinkname != NULL);
+
 	/*
 	 * Get connection to the foreign server.  Connection manager will
 	 * establish new connection if necessary.
@@ -1568,7 +1583,10 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	if (fsplan->scan.scanrelid > 0)
 	{
 		fsstate->rel = node->ss.ss_currentRelation;
-		fsstate->tupdesc = RelationGetDescr(fsstate->rel);
+		if (rte && rte->dblinkname)
+			fsstate->tupdesc = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+		else
+			fsstate->tupdesc = RelationGetDescr(fsstate->rel);
 	}
 	else
 	{
@@ -3854,7 +3872,7 @@ fetch_more_data(ForeignScanState *node)
 
 		fsstate->tuples[i] =
 			make_tuple_from_result_row(res, i,
-									   fsstate->rel,
+								   fsstate->is_dblink ? NULL : fsstate->rel,
 									   fsstate->attinmeta,
 									   fsstate->retrieved_attrs,
 									   node,
@@ -5649,6 +5667,130 @@ postgresImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 	ReleaseConnection(conn);
 
 	return commands;
+}
+
+/*
+ * Fetch remote column metadata for object@dblink and build a TupleDesc.
+ */
+static TupleDesc
+postgresGetDblinkTableMetadata(Oid serverOid,
+								   Oid userid,
+								   const char *remote_schema,
+								   const char *remote_table,
+								   uint64 *schema_signature)
+{
+	ForeignServer *server;
+	UserMapping *mapping;
+	PGconn	   *conn;
+	StringInfoData buf;
+	PGresult   *res;
+	int			ncols;
+	int			row;
+	TupleDesc	tupdesc;
+	uint64		sig = 0;
+
+	if (schema_signature)
+		*schema_signature = 0;
+
+	if (remote_table == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("remote table name is required for database link metadata")));
+
+	server = GetForeignServer(serverOid);
+	mapping = GetUserMapping(userid, server->serverid);
+	conn = GetConnection(mapping, false, NULL);
+
+	initStringInfo(&buf);
+	appendStringInfoString(&buf,
+						   "SELECT a.attname, "
+						   "  format_type(a.atttypid, a.atttypmod), "
+						   "  collname, collnsp.nspname "
+						   "FROM pg_class c "
+						   "  JOIN pg_namespace n ON relnamespace = n.oid "
+						   "  JOIN pg_attribute a ON attrelid = c.oid AND attnum > 0 "
+						   "    AND NOT attisdropped "
+						   "  LEFT JOIN pg_collation coll ON coll.oid = attcollation "
+						   "  LEFT JOIN pg_namespace collnsp ON collnsp.oid = collnamespace "
+						   "WHERE c.relkind IN ("
+						   CppAsString2(RELKIND_RELATION) ","
+						   CppAsString2(RELKIND_VIEW) ","
+						   CppAsString2(RELKIND_FOREIGN_TABLE) ","
+						   CppAsString2(RELKIND_MATVIEW) ","
+						   CppAsString2(RELKIND_PARTITIONED_TABLE) ") ");
+
+	/*
+	 * If remote_schema is not specified, default to "public".
+	 *
+	 * We intentionally do not rely on remote search_path, because the
+	 * postgres_fdw connection setup restricts it to pg_catalog for safety.
+	 */
+	if (remote_schema != NULL && remote_schema[0] != '\0')
+	{
+		appendStringInfoString(&buf, " AND n.nspname = ");
+		deparseStringLiteral(&buf, remote_schema);
+	}
+	else
+		appendStringInfoString(&buf, " AND n.nspname = 'public' ");
+
+	appendStringInfoString(&buf, " AND c.relname = ");
+	deparseStringLiteral(&buf, remote_table);
+
+	appendStringInfoString(&buf, " ORDER BY a.attnum");
+
+	res = pgfdw_exec_query(conn, buf.data, NULL);
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		pgfdw_report_error(res, conn, buf.data);
+
+	ncols = PQntuples(res);
+	if (ncols == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_TABLE),
+				 errmsg("relation \"%s\" does not exist on foreign server \"%s\"",
+						remote_table, server->servername)));
+
+	tupdesc = CreateTemplateTupleDesc(ncols);
+
+	for (row = 0; row < ncols; row++)
+	{
+		char		*attname = PQgetvalue(res, row, 0);
+		char		*typename = PQgetvalue(res, row, 1);
+		char		*collname = PQgetisnull(res, row, 2) ? NULL : PQgetvalue(res, row, 2);
+		char		*collnsp = PQgetisnull(res, row, 3) ? NULL : PQgetvalue(res, row, 3);
+		Oid			typid;
+		int32		typmod;
+		Oid			collid = InvalidOid;
+		List		*collnames;
+
+		if (!parseTypeString(typename, &typid, &typmod, NULL))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("could not parse remote type \"%s\"", typename)));
+
+		TupleDescInitEntry(tupdesc, row + 1, attname, typid, typmod, 0);
+
+		if (collname && collnsp)
+		{
+			collnames = list_make2(makeString(pstrdup(collnsp)),
+								 makeString(pstrdup(collname)));
+			collid = get_collation_oid(collnames, true);
+		}
+		if (!OidIsValid(collid))
+			collid = get_typcollation(typid);
+
+		TupleDescInitEntryCollation(tupdesc, row + 1, collid);
+
+		sig = hash_any_extended((unsigned char *) attname, strlen(attname), sig);
+		sig = hash_any_extended((unsigned char *) &typid, sizeof(Oid), sig);
+		sig = hash_any_extended((unsigned char *) &typmod, sizeof(int32), sig);
+		sig = hash_any_extended((unsigned char *) &collid, sizeof(Oid), sig);
+	}
+
+	if (schema_signature)
+		*schema_signature = sig;
+
+	PQclear(res);
+	return tupdesc;
 }
 
 /*

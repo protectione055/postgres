@@ -13,6 +13,7 @@
 #define FDWAPI_H
 
 #include "access/parallel.h"
+#include "access/tupdesc.h"
 #include "nodes/execnodes.h"
 #include "nodes/pathnodes.h"
 
@@ -160,6 +161,12 @@ typedef bool (*AnalyzeForeignTable_function) (Relation relation,
 typedef List *(*ImportForeignSchema_function) (ImportForeignSchemaStmt *stmt,
 											   Oid serverOid);
 
+typedef TupleDesc (*GetDblinkTableMetadata_function) (Oid serverOid,
+										   Oid userid,
+										   const char *remote_schema,
+										   const char *remote_table,
+										   uint64 *schema_signature);
+
 typedef void (*ExecForeignTruncate_function) (List *rels,
 											  DropBehavior behavior,
 											  bool restart_seqs);
@@ -258,6 +265,9 @@ typedef struct FdwRoutine
 
 	/* Support functions for IMPORT FOREIGN SCHEMA */
 	ImportForeignSchema_function ImportForeignSchema;
+
+	/* Support functions for @dblink remote metadata */
+	GetDblinkTableMetadata_function GetDblinkTableMetadata;
 
 	/* Support functions for TRUNCATE */
 	ExecForeignTruncate_function ExecForeignTruncate;

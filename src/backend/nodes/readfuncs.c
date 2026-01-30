@@ -435,6 +435,11 @@ _readRangeTblEntry(void)
 			break;
 	}
 
+		READ_STRING_FIELD(dblinkname);
+		READ_STRING_FIELD(dblinknamespace);
+		READ_STRING_FIELD(dblinkrelname);
+		READ_UINT64_FIELD(dblink_signature);
+
 	READ_BOOL_FIELD(lateral);
 	READ_BOOL_FIELD(inFromCl);
 	READ_NODE_FIELD(securityQuals);

@@ -292,7 +292,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 		CreateDomainStmt CreateExtensionStmt CreateGroupStmt CreateOpClassStmt
 		CreateOpFamilyStmt AlterOpFamilyStmt CreatePLangStmt
 		CreateSchemaStmt CreateSeqStmt CreateStmt CreateStatsStmt CreateTableSpaceStmt
-		CreateFdwStmt CreateForeignServerStmt CreateForeignTableStmt
+		CreateDatabaseLinkStmt CreateFdwStmt CreateForeignServerStmt CreateForeignTableStmt
 		CreateAssertionStmt CreateTransformStmt CreateTrigStmt CreateEventTrigStmt
 		CreateUserStmt CreateUserMappingStmt CreateRoleStmt CreatePolicyStmt
 		CreatedbStmt DeclareCursorStmt DefineStmt DeleteStmt DiscardStmt DoStmt
@@ -300,7 +300,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 		DropCastStmt DropRoleStmt
 		DropdbStmt DropTableSpaceStmt
 		DropTransformStmt
-		DropUserMappingStmt ExplainStmt FetchStmt
+		DropDatabaseLinkStmt DropUserMappingStmt ExplainStmt FetchStmt
 		GrantStmt GrantRoleStmt ImportForeignSchemaStmt IndexStmt InsertStmt
 		ListenStmt LoadStmt LockStmt MergeStmt NotifyStmt ExplainableStmt PreparableStmt
 		CreateFunctionStmt AlterFunctionStmt ReindexStmt RemoveAggrStmt
@@ -591,6 +591,8 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <str>		createdb_opt_name plassign_target
 %type <node>	var_value zone_value
 %type <rolespec> auth_ident RoleSpec opt_granted_by
+%type <rolespec> dblink_connect_opt
+%type <str>		dblink_identified_opt dblink_using_opt
 %type <publicationobjectspec> PublicationObjSpec
 %type <publicationallobjectspec> PublicationAllObjSpec
 
@@ -718,7 +720,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	CHARACTER CHARACTERISTICS CHECK CHECKPOINT CLASS CLOSE
 	CLUSTER COALESCE COLLATE COLLATION COLUMN COLUMNS COMMENT COMMENTS COMMIT
 	COMMITTED COMPRESSION CONCURRENTLY CONDITIONAL CONFIGURATION CONFLICT
-	CONNECTION CONSTRAINT CONSTRAINTS CONTENT_P CONTINUE_P CONVERSION_P COPY
+	CONNECT CONNECTION CONSTRAINT CONSTRAINTS CONTENT_P CONTINUE_P CONVERSION_P COPY
 	COST CREATE CROSS CSV CUBE CURRENT_P
 	CURRENT_CATALOG CURRENT_DATE CURRENT_ROLE CURRENT_SCHEMA
 	CURRENT_TIME CURRENT_TIMESTAMP CURRENT_USER CURSOR CYCLE
@@ -739,7 +741,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 
 	HANDLER HAVING HEADER_P HOLD HOUR_P
 
-	IDENTITY_P IF_P IGNORE_P ILIKE IMMEDIATE IMMUTABLE IMPLICIT_P IMPORT_P IN_P INCLUDE
+	IDENTIFIED IDENTITY_P IF_P IGNORE_P ILIKE IMMEDIATE IMMUTABLE IMPLICIT_P IMPORT_P IN_P INCLUDE
 	INCLUDING INCREMENT INDENT INDEX INDEXES INHERIT INHERITS INITIALLY INLINE_P
 	INNER_P INOUT INPUT_P INSENSITIVE INSERT INSTEAD INT_P INTEGER
 	INTERSECT INTERVAL INTO INVOKER IS ISNULL ISOLATION
@@ -750,7 +752,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	KEEP KEY KEYS
 
 	LABEL LANGUAGE LARGE_P LAST_P LATERAL_P
-	LEADING LEAKPROOF LEAST LEFT LEVEL LIKE LIMIT LISTEN LOAD LOCAL
+	LEADING LEAKPROOF LEAST LEFT LEVEL LIKE LIMIT LINK_P LISTEN LOAD LOCAL
 	LOCALTIME LOCALTIMESTAMP LOCATION LOCK_P LOCKED LOGGED LSN_P
 
 	MAPPING MATCH MATCHED MATERIALIZED MAXVALUE MERGE MERGE_ACTION METHOD
@@ -1046,6 +1048,7 @@ stmt:
 			| CreateConversionStmt
 			| CreateDomainStmt
 			| CreateExtensionStmt
+			| CreateDatabaseLinkStmt
 			| CreateFdwStmt
 			| CreateForeignServerStmt
 			| CreateForeignTableStmt
@@ -1086,6 +1089,7 @@ stmt:
 			| DropTableSpaceStmt
 			| DropTransformStmt
 			| DropRoleStmt
+			| DropDatabaseLinkStmt
 			| DropUserMappingStmt
 			| DropdbStmt
 			| ExecuteStmt
@@ -5949,6 +5953,57 @@ CreateUserMappingStmt: CREATE USER MAPPING FOR auth_ident SERVER name create_gen
 				}
 		;
 
+/*****************************************************************************
+ *
+ *		QUERY:
+ *			CREATE DATABASE LINK name
+ *				[IF NOT EXISTS]
+ *				[CONNECT TO role_spec]
+ *				[IDENTIFIED BY 'password']
+ *				[USING 'connstr']
+ *
+ *****************************************************************************/
+
+CreateDatabaseLinkStmt:
+		CREATE DATABASE LINK_P name dblink_connect_opt dblink_identified_opt dblink_using_opt
+				{
+					CreateDatabaseLinkStmt *n = makeNode(CreateDatabaseLinkStmt);
+
+					n->dblinkname = $4;
+					n->if_not_exists = false;
+					n->username = $5;
+					n->password = $6;
+					n->connstr = $7;
+					$$ = (Node *) n;
+				}
+			| CREATE DATABASE LINK_P IF_P NOT EXISTS name dblink_connect_opt dblink_identified_opt dblink_using_opt
+				{
+					CreateDatabaseLinkStmt *n = makeNode(CreateDatabaseLinkStmt);
+
+					n->dblinkname = $7;
+					n->if_not_exists = true;
+					n->username = $8;
+					n->password = $9;
+					n->connstr = $10;
+					$$ = (Node *) n;
+				}
+		;
+
+dblink_connect_opt:
+		CONNECT TO RoleSpec			{ $$ = $3; }
+		| /*EMPTY*/				{ $$ = NULL; }
+		;
+
+dblink_identified_opt:
+		IDENTIFIED BY Sconst		{ $$ = $3; }
+		| /*EMPTY*/				{ $$ = NULL; }
+		;
+
+dblink_using_opt:
+		USING Sconst				{ $$ = $2; }
+		| /*EMPTY*/				{ $$ = NULL; }
+		;
+
 /* User mapping authorization identifier */
 auth_ident: RoleSpec			{ $$ = $1; }
 			| USER				{ $$ = makeRoleSpec(ROLESPEC_CURRENT_USER, @1); }
@@ -5978,6 +6033,32 @@ DropUserMappingStmt: DROP USER MAPPING FOR auth_ident SERVER name
 
 					n->user = $7;
 					n->servername = $9;
+					n->missing_ok = true;
+					$$ = (Node *) n;
+				}
+		;
+
+/*****************************************************************************
+ *
+ *		QUERY :
+ *			DROP DATABASE LINK name
+ *
+ ****************************************************************************/
+
+DropDatabaseLinkStmt:
+		DROP DATABASE LINK_P name
+				{
+					DropDatabaseLinkStmt *n = makeNode(DropDatabaseLinkStmt);
+
+					n->dblinkname = $4;
+					n->missing_ok = false;
+					$$ = (Node *) n;
+				}
+		| DROP DATABASE LINK_P IF_P EXISTS name
+				{
+					DropDatabaseLinkStmt *n = makeNode(DropDatabaseLinkStmt);
+
+					n->dblinkname = $6;
 					n->missing_ok = true;
 					$$ = (Node *) n;
 				}
@@ -14110,6 +14191,30 @@ relation_expr:
 					$$->inh = true;
 					$$->alias = NULL;
 				}
+			| qualified_name Op name
+				{
+					/*
+					 * Oracle-style remote reference: schema.table@dblink
+					 *
+					 * The lexer returns '@' as Op with yylval->str == "@".
+					 * We store the dblink name in RangeVar.catalogname as a compact
+					 * carrier through parse analysis and view serialization.
+					 */
+					if (strcmp($2, "@") != 0)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("syntax error"),
+								 parser_errposition(@2)));
+					$$ = $1;
+					if ($$->catalogname != NULL)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("database-qualified names are not supported with @dblink"),
+								 parser_errposition(@2)));
+					$$->catalogname = $3;
+					$$->inh = true;
+					$$->alias = NULL;
+				}
 			| extended_relation_expr
 				{
 					$$ = $1;
@@ -17939,6 +18044,7 @@ unreserved_keyword:
 			| CONDITIONAL
 			| CONFIGURATION
 			| CONFLICT
+			| CONNECT
 			| CONNECTION
 			| CONSTRAINTS
 			| CONTENT_P
@@ -18008,6 +18114,7 @@ unreserved_keyword:
 			| HEADER_P
 			| HOLD
 			| HOUR_P
+			| IDENTIFIED
 			| IDENTITY_P
 			| IF_P
 			| IGNORE_P
@@ -18397,6 +18504,7 @@ reserved_keyword:
 			| LATERAL_P
 			| LEADING
 			| LIMIT
+			| LINK_P
 			| LOCALTIME
 			| LOCALTIMESTAMP
 			| NOT
@@ -18508,6 +18616,7 @@ bare_label_keyword:
 			| CONDITIONAL
 			| CONFIGURATION
 			| CONFLICT
+			| CONNECT
 			| CONNECTION
 			| CONSTRAINT
 			| CONSTRAINTS
@@ -18601,6 +18710,7 @@ bare_label_keyword:
 			| HANDLER
 			| HEADER_P
 			| HOLD
+			| IDENTIFIED
 			| IDENTITY_P
 			| IF_P
 			| ILIKE
@@ -18657,6 +18767,7 @@ bare_label_keyword:
 			| LEFT
 			| LEVEL
 			| LIKE
+			| LINK_P
 			| LISTEN
 			| LOAD
 			| LOCAL

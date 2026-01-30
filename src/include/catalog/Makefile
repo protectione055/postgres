@@ -65,6 +65,7 @@ CATALOG_HEADERS := \
 	pg_foreign_server.h \
 	pg_user_mapping.h \
 	pg_foreign_table.h \
+	pg_dblink.h \
 	pg_policy.h \
 	pg_replication_origin.h \
 	pg_default_acl.h \
@@ -99,6 +100,7 @@ POSTGRES_BKI_DATA = \
 	pg_collation.dat \
 	pg_conversion.dat \
 	pg_database.dat \
+	pg_dblink.dat \
 	pg_language.dat \
 	pg_namespace.dat \
 	pg_opclass.dat \

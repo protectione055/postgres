@@ -14,10 +14,12 @@
 
 #include "access/htup_details.h"
 #include "access/reloptions.h"
+#include "access/tupdesc.h"
 #include "catalog/pg_foreign_data_wrapper.h"
 #include "catalog/pg_foreign_server.h"
 #include "catalog/pg_foreign_table.h"
 #include "catalog/pg_user_mapping.h"
+#include "catalog/pg_dblink.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
 #include "funcapi.h"
@@ -25,9 +27,11 @@
 #include "optimizer/paths.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
+#include "utils/hsearch.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
+#include "utils/timestamp.h"
 #include "utils/varlena.h"
 
 
@@ -858,3 +862,142 @@ GetExistingLocalJoinPath(RelOptInfo *joinrel)
 	}
 	return NULL;
 }
+
+/*
+ * Dblink Metadata Cache
+ */
+typedef struct DblinkMetaCacheKey
+{
+	Oid			serverid;
+	Oid			userid;
+	char		nspname[NAMEDATALEN];
+	char		relname[NAMEDATALEN];
+} DblinkMetaCacheKey;
+
+typedef struct DblinkMetaCacheEntry
+{
+	DblinkMetaCacheKey key;
+	TupleDesc	tupdesc;
+	uint64		signature;
+	TimestampTz expires_at;
+} DblinkMetaCacheEntry;
+
+static HTAB *DblinkMetaCache = NULL;
+
+static void
+ValidateDblinkMetaCache(void)
+{
+	HASHCTL		ctl;
+
+	/* Make sure we've initialized CacheMemoryContext. */
+	if (CacheMemoryContext == NULL)
+		CreateCacheMemoryContext();
+
+	if (DblinkMetaCache)
+		return;
+
+	MemSet(&ctl, 0, sizeof(ctl));
+	ctl.keysize = sizeof(DblinkMetaCacheKey);
+	ctl.entrysize = sizeof(DblinkMetaCacheEntry);
+	ctl.hcxt = CacheMemoryContext;
+
+	DblinkMetaCache = hash_create("Dblink Metadata Cache", 128, &ctl, HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+}
+
+TupleDesc
+GetCachedDblinkTableMetadata(Oid serverid, Oid userid, const char *nspname, const char *relname, uint64 *signature)
+{
+	DblinkMetaCacheKey key;
+	DblinkMetaCacheEntry *entry;
+	bool		found;
+	TimestampTz now = GetCurrentTimestamp();
+	TupleDesc	tupdesc = NULL;
+	FdwRoutine *fdw;
+	int			ttl_sec = 60;	/* Default */
+
+	MemSet(&key, 0, sizeof(key));
+	key.serverid = serverid;
+	key.userid = userid;
+	if (nspname)
+		strlcpy(key.nspname, nspname, NAMEDATALEN);
+	strlcpy(key.relname, relname, NAMEDATALEN);
+
+	ValidateDblinkMetaCache();
+
+	entry = (DblinkMetaCacheEntry *) hash_search(DblinkMetaCache, &key, HASH_FIND, &found);
+
+	if (found)
+	{
+		if (entry->expires_at > now)
+		{
+			if (signature)
+				*signature = entry->signature;
+			return CreateTupleDescCopy(entry->tupdesc);
+		}
+	}
+
+	/* Retrieve TTL from pg_dblink */
+	{
+		ForeignServer *server = GetForeignServer(serverid);
+		HeapTuple	tup;
+
+		tup = SearchSysCache1(DBLINKNAME, CStringGetDatum(server->servername));
+		if (HeapTupleIsValid(tup))
+		{
+			Datum		options_datum;
+			bool		isnull;
+
+			options_datum = SysCacheGetAttr(DBLINKNAME, tup, Anum_pg_dblink_dbloptions, &isnull);
+			if (!isnull)
+			{
+				List	   *options = untransformRelOptions(options_datum);
+				ListCell   *lc;
+
+				foreach(lc, options)
+				{
+					DefElem    *def = (DefElem *) lfirst(lc);
+
+					if (strcmp(def->defname, "meta_ttl") == 0)
+					{
+						ttl_sec = atoi(strVal(def->arg));
+						break;
+					}
+				}
+			}
+			ReleaseSysCache(tup);
+		}
+	}
+
+	fdw = GetFdwRoutineByServerId(serverid);
+	if (fdw->GetDblinkTableMetadata == NULL)
+		ereport(ERROR,
+(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+ errmsg("FDW does not support database link metadata")));
+
+	tupdesc = fdw->GetDblinkTableMetadata(serverid, userid, nspname, relname, signature);
+
+	if (tupdesc)
+	{
+		bool		entry_found;
+		MemoryContext oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
+		TupleDesc	cached_desc = CreateTupleDescCopy(tupdesc);
+
+		MemoryContextSwitchTo(oldcxt);
+
+		entry = (DblinkMetaCacheEntry *) hash_search(DblinkMetaCache, &key, HASH_ENTER, &entry_found);
+		if (entry_found && entry->tupdesc)
+			FreeTupleDesc(entry->tupdesc);
+
+		entry->tupdesc = cached_desc;
+		entry->signature = signature ? *signature : 0;
+		entry->expires_at = TimestampTzPlusMilliseconds(now, ttl_sec * 1000L);
+	}
+	else
+	{
+		if (found)
+			hash_search(DblinkMetaCache, &key, HASH_REMOVE, NULL);
+	}
+
+	return tupdesc;
+}
+

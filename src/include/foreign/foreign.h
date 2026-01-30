@@ -82,4 +82,6 @@ extern List *GetForeignColumnOptions(Oid relid, AttrNumber attnum);
 extern Oid	get_foreign_data_wrapper_oid(const char *fdwname, bool missing_ok);
 extern Oid	get_foreign_server_oid(const char *servername, bool missing_ok);
 
+extern TupleDesc GetCachedDblinkTableMetadata(Oid serverid, Oid userid, const char *nspname, const char *relname, uint64 *signature);
+
 #endif							/* FOREIGN_H */
