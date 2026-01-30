@@ -2895,14 +2895,12 @@ deparseRelation(StringInfo buf, Relation rel, const RangeTblEntry *rte)
 	if (nspname == NULL)
 	{
 		if (rte && rte->dblinkname)
-			appendStringInfo(buf, "%s", quote_identifier(relname));
+			nspname = "public";
 		else
-		{
 			nspname = get_namespace_name(RelationGetNamespace(rel));
-			appendStringInfo(buf, "%s.%s",
-							 quote_identifier(nspname),
-							 quote_identifier(relname));
-		}
+		appendStringInfo(buf, "%s.%s",
+					 quote_identifier(nspname),
+					 quote_identifier(relname));
 	}
 	else
 		appendStringInfo(buf, "%s.%s",

@@ -889,6 +889,10 @@ ValidateDblinkMetaCache(void)
 {
 	HASHCTL		ctl;
 
+	/* Make sure we've initialized CacheMemoryContext. */
+	if (CacheMemoryContext == NULL)
+		CreateCacheMemoryContext();
+
 	if (DblinkMetaCache)
 		return;
 
@@ -920,13 +924,14 @@ GetCachedDblinkTableMetadata(Oid serverid, Oid userid, const char *nspname, cons
 
 	ValidateDblinkMetaCache();
 
-	entry = (DblinkMetaCacheEntry *) hash_search(DblinkMetaCache, &key, HASH_ENTER, &found);
+	entry = (DblinkMetaCacheEntry *) hash_search(DblinkMetaCache, &key, HASH_FIND, &found);
 
 	if (found)
 	{
 		if (entry->expires_at > now)
 		{
-			*signature = entry->signature;
+			if (signature)
+				*signature = entry->signature;
 			return CreateTupleDescCopy(entry->tupdesc);
 		}
 	}
@@ -973,16 +978,18 @@ GetCachedDblinkTableMetadata(Oid serverid, Oid userid, const char *nspname, cons
 
 	if (tupdesc)
 	{
+		bool		entry_found;
 		MemoryContext oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
 		TupleDesc	cached_desc = CreateTupleDescCopy(tupdesc);
 
 		MemoryContextSwitchTo(oldcxt);
 
-		if (found && entry->tupdesc)
+		entry = (DblinkMetaCacheEntry *) hash_search(DblinkMetaCache, &key, HASH_ENTER, &entry_found);
+		if (entry_found && entry->tupdesc)
 			FreeTupleDesc(entry->tupdesc);
 
 		entry->tupdesc = cached_desc;
-		entry->signature = *signature;
+		entry->signature = signature ? *signature : 0;
 		entry->expires_at = TimestampTzPlusMilliseconds(now, ttl_sec * 1000L);
 	}
 	else

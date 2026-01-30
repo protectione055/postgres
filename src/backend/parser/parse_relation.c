@@ -870,6 +870,7 @@ scanRTEForColumn(ParseState *pstate, RangeTblEntry *rte,
 	 * excluded.
 	 */
 	if (rte->rtekind == RTE_RELATION &&
+		!rte->dblinkname &&
 		rte->relkind != RELKIND_COMPOSITE_TYPE)
 	{
 		/* quick check to see if name could be a system column */
@@ -2883,6 +2884,74 @@ expandRTE(RangeTblEntry *rte, int rtindex, int sublevels_up,
 	{
 		case RTE_RELATION:
 			/* Ordinary relation RTE */
+			if (rte->dblinkname)
+			{
+				ListCell   *aliasp_item;
+				ListCell   *lct;
+				ListCell   *lcm;
+				ListCell   *lcc;
+
+				aliasp_item = colnames ? list_head(rte->eref->colnames) : NULL;
+				varattno = 0;
+				forthree(lct, rte->coltypes,
+						 lcm, rte->coltypmods,
+						 lcc, rte->colcollations)
+				{
+					Oid			coltype = lfirst_oid(lct);
+					int32		coltypmod = lfirst_int(lcm);
+					Oid			colcoll = lfirst_oid(lcc);
+
+					varattno++;
+
+					if (colnames)
+					{
+						/* Assume there is one alias per output column */
+						if (OidIsValid(coltype))
+						{
+							char	   *label;
+
+							if (!aliasp_item)
+								elog(ERROR, "too few column names for rangetable entry %s",
+									 rte->eref->aliasname);
+							label = strVal(lfirst(aliasp_item));
+							*colnames = lappend(*colnames,
+											makeString(pstrdup(label)));
+						}
+						else if (include_dropped)
+							*colnames = lappend(*colnames,
+											makeString(pstrdup("")));
+
+						aliasp_item = lnext(rte->eref->colnames, aliasp_item);
+					}
+
+					if (colvars)
+					{
+						if (OidIsValid(coltype))
+						{
+							Var		   *varnode;
+
+							varnode = makeVar(rtindex, varattno,
+										  coltype, coltypmod, colcoll,
+										  sublevels_up);
+							varnode->varreturningtype = returning_type;
+							varnode->location = location;
+							*colvars = lappend(*colvars, varnode);
+						}
+						else if (include_dropped)
+						{
+							/*
+							 * It doesn't really matter what type the Const
+							 * claims to be.
+							 */
+							*colvars = lappend(*colvars,
+											makeNullConst(INT4OID, -1,
+														 InvalidOid));
+						}
+					}
+				}
+				break;
+			}
+
 			expandRelation(rte->relid, rte->eref,
 						   rtindex, sublevels_up, returning_type, location,
 						   include_dropped, colnames, colvars);

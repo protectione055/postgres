@@ -5719,13 +5719,19 @@ postgresGetDblinkTableMetadata(Oid serverOid,
 						   CppAsString2(RELKIND_MATVIEW) ","
 						   CppAsString2(RELKIND_PARTITIONED_TABLE) ") ");
 
-	if (remote_schema != NULL)
+	/*
+	 * If remote_schema is not specified, default to "public".
+	 *
+	 * We intentionally do not rely on remote search_path, because the
+	 * postgres_fdw connection setup restricts it to pg_catalog for safety.
+	 */
+	if (remote_schema != NULL && remote_schema[0] != '\0')
 	{
 		appendStringInfoString(&buf, " AND n.nspname = ");
 		deparseStringLiteral(&buf, remote_schema);
 	}
 	else
-		appendStringInfoString(&buf, " AND n.nspname = current_schema() ");
+		appendStringInfoString(&buf, " AND n.nspname = 'public' ");
 
 	appendStringInfoString(&buf, " AND c.relname = ");
 	deparseStringLiteral(&buf, remote_table);

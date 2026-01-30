@@ -10,6 +10,10 @@ CREATE SCHEMA dblink_cache;
 CREATE TABLE dblink_cache.test_remote_table (id int, data text);
 INSERT INTO dblink_cache.test_remote_table VALUES (1, 'initial');
 
+-- Create a table in public schema to test default schema behavior
+CREATE TABLE public.test_remote_public (id int, data text);
+INSERT INTO public.test_remote_public VALUES (1, 'public');
+
 -- Helper to create link with dynamic dbname
 DO $d$
 BEGIN
@@ -23,6 +27,9 @@ $d$;
 -- 1. Test Cache Hit (Regression)
 -- Access to load cache
 SELECT * FROM dblink_cache.test_remote_table@mylink_ttl ORDER BY id;
+
+-- Access without explicit schema should default to public
+SELECT * FROM test_remote_public@mylink_ttl ORDER BY id;
 
 -- Modify remote table: this would break query if cache is used (because * expands using old schema, but remote requires new schema or errors)
 -- Wait, if we use *, postgres_fdw constructs query "SELECT id, data FROM ...".
@@ -94,5 +101,6 @@ $d$;
 -- Cleanup
 DROP DATABASE LINK mylink_ttl;
 DROP DATABASE LINK mylink_short;
+DROP TABLE public.test_remote_public;
 DROP TABLE dblink_cache.test_remote_table;
 DROP SCHEMA dblink_cache;
